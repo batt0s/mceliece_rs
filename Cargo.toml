@@ -1,0 +1,12 @@
+[package]
+name = "mceliece"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["mceliece348864"]
+mceliece348864 = []
+mceliece460896 = []
+mceliece6960119 = []
+
+[dependencies]
