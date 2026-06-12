@@ -2,6 +2,8 @@
 name = "mceliece"
 version = "0.1.0"
 edition = "2024"
+authors = ["batt0s <me@battos.dev>"]
+description = "A Rust implementation of the Classic McEliece cryptosystem"
 
 [features]
 default = ["mceliece348864"]
@@ -10,3 +12,5 @@ mceliece460896 = []
 mceliece6960119 = []
 
 [dependencies]
+rand = "0.8"
+sha3 = "0.10"

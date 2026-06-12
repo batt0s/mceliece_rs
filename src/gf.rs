@@ -54,6 +54,10 @@ impl<const M: u8> GF<M> {
 
         res
     }
+
+    pub fn sqrt(self) -> Self {
+        self.pow(1 << (M - 1))
+    }
 }
 
 impl<const M: u8> Add for GF<M> {
@@ -156,5 +160,19 @@ mod tests {
         let a = TestGF::new(15);
         let a_inv = a.inv();
         assert_eq!(a_inv * a, TestGF::new(1)); // 15 * 11 = 1
+    }
+
+    #[test]
+    fn test_gf_sqrt() {
+        let a = TestGF::new(1234);
+        let a_sq = a.sq();
+
+        assert_eq!(a_sq.sqrt(), a, "Sqrt failed");
+
+        let zero = TestGF::new(0);
+        assert_eq!(zero.sqrt(), zero, "sqrt(0) should be 0");
+
+        let one = TestGF::new(1);
+        assert_eq!(one.sqrt(), one, "sqrt(1) should be 1");
     }
 }
