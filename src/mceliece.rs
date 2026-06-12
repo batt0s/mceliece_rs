@@ -3,6 +3,7 @@ use crate::params::PARAMS;
 use crate::poly::Polynomial;
 use crate::subroutines::{decode, encode, matgen, pack_bits, unpack_bits};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
@@ -14,6 +15,7 @@ pub type SysPoly = Polynomial<{ PARAMS.m }>;
 pub type Ciphertext = Vec<u8>;
 pub type SessionKey = [u8; 32];
 
+#[derive(Serialize, Deserialize)]
 pub struct PublicKey {
     pub T: Vec<Vec<u8>>,
 }
@@ -483,7 +485,9 @@ mod tests {
             c_tampered[0] ^= 0xFF;
         }
         let k_dec_tampered = decapsulate(&c_tampered, &sk);
-        assert_ne!(k_enc, k_dec_tampered, "Tampered ciphertext should not yield same session key");
+        assert_ne!(
+            k_enc, k_dec_tampered,
+            "Tampered ciphertext should not yield same session key"
+        );
     }
 }
-
