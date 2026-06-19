@@ -1,5 +1,5 @@
 use crate::gf::GF;
-use crate::params::PARAMS;
+use crate::params::{PARAMS, POLY_CAPACITY};
 use crate::poly::Polynomial;
 use crate::subroutines::{decode, encode, matgen, pack_bits, unpack_bits};
 use rand::Rng;
@@ -10,7 +10,7 @@ use sha3::{
 };
 
 pub type SysGF = GF<{ PARAMS.m }>;
-pub type SysPoly = Polynomial<{ PARAMS.m }>;
+pub type SysPoly = Polynomial<{ PARAMS.m }, POLY_CAPACITY>;
 
 pub type Ciphertext = Vec<u8>;
 pub type SessionKey = [u8; 32];
@@ -38,8 +38,8 @@ pub fn generate_irreducible(bits: &[u16]) -> Option<SysPoly> {
         return None;
     }
 
-    // Step 1: Build Beta_j scalars from bits
-    let mut betas: Vec<SysGF> = Vec::with_capacity(t);
+    // Step 1 & 2: Build Beta_j scalars from bits, then build Beta polynomial
+    let mut beta = SysPoly::zero();
     for j in 0..t {
         let mut beta_j = SysGF::new(0);
         for i in 0..(PARAMS.m as usize) {
@@ -48,11 +48,8 @@ pub fn generate_irreducible(bits: &[u16]) -> Option<SysPoly> {
                 beta_j.0 = beta_j.0 + SysGF::new(2).pow(i as u16).0;
             }
         }
-        betas.push(beta_j);
+        beta.coeffs[j] = beta_j;
     }
-
-    // Step 2: Build Beta polynomial from Beta_j scalars
-    let beta = SysPoly::new(betas);
 
     // Step 3: Compute minimal polynomial of Beta in GF(2^M)
     let g = beta.minpoly(&PARAMS.f_y());

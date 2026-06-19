@@ -56,8 +56,15 @@ static F_Y_COEFFS_460896: [u16; 97] = {
     arr
 };
 
+pub const POLY_CAPACITY: usize = 256;
+
 impl McElieceParams {
-    pub fn f_y<const M: u8>(&self) -> Polynomial<M> {
-        Polynomial::new(self.f_y_coeffs.iter().map(|&v| GF::<M>::new(v)).collect())
+    pub fn f_y<const M: u8>(&self) -> Polynomial<M, POLY_CAPACITY> {
+        let mut poly = Polynomial::zero();
+        let len = self.f_y_coeffs.len().min(POLY_CAPACITY);
+        for i in 0..len {
+            poly.coeffs[i] = GF::<M>::new(self.f_y_coeffs[i]);
+        }
+        poly
     }
 }

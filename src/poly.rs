@@ -9,40 +9,54 @@ macro_rules! poly {
             $(
                 temp_vec.push(crate::gf::GF::new($x));
             )*
-            crate::poly::Polynomial::new(temp_vec)
+            crate::poly::Polynomial::from_slice(&temp_vec)
         }
     };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Polynomial<const M: u8> {
-    pub coeffs: Vec<GF<M>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Polynomial<const M: u8, const N: usize> {
+    pub coeffs: [GF<M>; N],
 }
 
-impl<const M: u8> Polynomial<M> {
-    pub fn new(coeffs: Vec<GF<M>>) -> Self {
+impl<const M: u8, const N: usize> Polynomial<M, N> {
+    pub fn new(coeffs: [GF<M>; N]) -> Self {
         Polynomial { coeffs }
     }
 
-    pub fn clean(&mut self) {
-        while self.coeffs.len() > 1 && self.coeffs.last().unwrap().0 == 0 {
-            self.coeffs.pop();
+    pub const fn zero() -> Self {
+        Polynomial { coeffs: [GF(0); N] }
+    }
+
+    pub fn from_slice(slice: &[GF<M>]) -> Self {
+        let mut coeffs = [GF::new(0); N];
+
+        let copy_len = slice.len().min(N);
+        for i in 0..copy_len {
+            coeffs[i] = slice[i];
         }
+
+        Polynomial { coeffs }
     }
 
     pub fn deg(&self) -> usize {
-        self.coeffs.len().saturating_sub(1)
+        for i in (0..N).rev() {
+            if self.coeffs[i].0 != 0 {
+                return i;
+            }
+        }
+        0
     }
 
     pub fn is_zero(&self) -> bool {
-        self.coeffs.is_empty() || (self.coeffs.len() == 1 && self.coeffs[0].0 == 0)
+        self.deg() == 0 && self.coeffs[0].0 == 0
     }
 
     // Horner's method for polynomial evaluation
     pub fn eval(&self, x: GF<M>) -> GF<M> {
         let mut res = GF::new(0);
-        for &coeff in self.coeffs.iter().rev() {
-            res = (res * x) + coeff;
+        for i in (0..N).rev() {
+            res = (res * x) + self.coeffs[i];
         }
         res
     }
@@ -51,21 +65,18 @@ impl<const M: u8> Polynomial<M> {
         if self.is_zero() {
             return;
         }
-        let leading = *self.coeffs.last().unwrap();
+        let leading = self.coeffs[self.deg()];
         if leading.0 != 1 {
             let inv = leading.inv();
-            for coeff in self.coeffs.iter_mut() {
-                *coeff = *coeff * inv;
+            for i in 0..=self.deg() {
+                self.coeffs[i] = self.coeffs[i] * inv;
             }
         }
     }
 
     pub fn div_rem(dividend: &Self, divisor: &Self) -> (Self, Self) {
-        let mut rem = dividend.clone();
-        rem.clean();
-
-        let mut div = divisor.clone();
-        div.clean();
+        let mut rem = *dividend;
+        let div = *divisor;
 
         if div.is_zero() {
             panic!("divisor is zero");
@@ -73,31 +84,32 @@ impl<const M: u8> Polynomial<M> {
 
         // If the degree of the remainder is less than the degree of the divisor, return 0 and the remainder
         if rem.deg() < div.deg() {
-            return (Polynomial::new(vec![GF::new(0)]), rem);
+            return (Self::zero(), rem);
         }
 
-        let mut q_coeffs = vec![GF::new(0); dividend.deg() - divisor.deg() + 1];
+        let mut q_coeffs = [GF::new(0); N];
 
-        let div_lead_inv = div.coeffs.last().unwrap().inv();
+        let div_lead_inv = div.coeffs[div.deg()].inv();
 
         while !rem.is_zero() && rem.deg() >= div.deg() {
             let deg_diff = rem.deg() - div.deg();
-            let rem_lead = *rem.coeffs.last().unwrap();
+            let rem_lead = rem.coeffs[rem.deg()];
 
             let ratio = rem_lead * div_lead_inv;
 
-            q_coeffs[deg_diff] = ratio;
-
-            // Remainder = Remainder - (ration * divisor) [in XOR (+) and (-) is the same]
-            for i in 0..div.coeffs.len() {
-                rem.coeffs[deg_diff + i] = rem.coeffs[deg_diff + i] + (div.coeffs[i] * ratio);
+            if deg_diff < N {
+                q_coeffs[deg_diff] = ratio;
             }
 
-            rem.clean();
+            // Remainder = Remainder - (ration * divisor) [in XOR (+) and (-) is the same]
+            for i in 0..N {
+                if deg_diff + i < N {
+                    rem.coeffs[deg_diff + i] = rem.coeffs[deg_diff + i] + (div.coeffs[i] * ratio);
+                }
+            }
         }
 
-        let mut q = Polynomial::new(q_coeffs);
-        q.clean();
+        let q = Polynomial::new(q_coeffs);
 
         (q, rem)
     }
@@ -106,8 +118,8 @@ impl<const M: u8> Polynomial<M> {
     // INPUT: two polynomials g and h over Z_p[x]
     // OUTPUT: the greatest common divisor of g and h
     pub fn gcd(g: &Self, h: &Self) -> Self {
-        let mut g = g.clone();
-        let mut h = h.clone();
+        let mut g = *g;
+        let mut h = *h;
         while !h.is_zero() {
             let (_, r) = Self::div_rem(&g, &h);
             g = h;
@@ -121,7 +133,8 @@ impl<const M: u8> Polynomial<M> {
     // INPUT: a polynomial g in F_q^m (&self), and an integer 0 <= k < p^m - 1 (where F_q^m = Z_p[x]/f)
     // OUTPUT: the result of g^k mod f
     pub fn mod_pow(&self, mut k: usize, f: &Self) -> Self {
-        let mut s = Polynomial::new(vec![GF::new(1)]);
+        let mut s = Self::zero();
+        s.coeffs[0] = GF(1);
         if k == 0 {
             return s;
         }
@@ -153,19 +166,16 @@ impl<const M: u8> Polynomial<M> {
             return false;
         }
 
-        let mut u = poly!(0, 1);
+        let mut u = Self::zero();
+        u.coeffs[1] = GF::new(1);
+
         let q = 1usize << (M as usize);
 
         for _ in 1..=(self.deg() / 2) {
             u = u.mod_pow(q, self);
 
-            let mut u_minus_x = u.clone();
-            if u_minus_x.coeffs.len() > 1 {
-                u_minus_x.coeffs[1] = u_minus_x.coeffs[1] + GF::new(1);
-            } else {
-                u_minus_x.coeffs = vec![u.coeffs.get(0).copied().unwrap_or(GF::new(0)), GF::new(1)];
-            }
-            u_minus_x.clean();
+            let mut u_minus_x = u;
+            u_minus_x.coeffs[1] = u_minus_x.coeffs[1] + GF::new(1);
 
             let d = Polynomial::gcd(&u_minus_x, self);
 
@@ -177,30 +187,34 @@ impl<const M: u8> Polynomial<M> {
         true
     }
 
+    // constant time reduce
     // self mod f
-    pub fn reduce(&self, f: &Self) -> Self {
-        let mut rem = self.clone();
-        rem.clean();
-        let f_deg = f.deg();
-        let f_lead_inv = f.coeffs.last().unwrap().inv();
-        while !rem.is_zero() && rem.deg() >= f_deg {
-            let deg_diff = rem.deg() - f_deg;
-            let ratio = *rem.coeffs.last().unwrap() * f_lead_inv;
-            for (i, &fc) in f.coeffs.iter().enumerate() {
-                if fc.0 != 0 {
-                    rem.coeffs[deg_diff + i] = rem.coeffs[deg_diff + i] + fc * ratio;
-                }
-            }
-            rem.clean();
+    pub fn reduce(&self, f: &Self, t: usize) -> Self {
+        let mut r = self.coeffs;
+        if self.deg() < t {
+            return Polynomial::new(r);
         }
-        rem
+
+        for i in (t..N).rev() {
+            let c = r[i];
+            for j in 0..t {
+                let f_j = f.coeffs[j];
+                r[i - t + j] = r[i - t + j] + (c * f_j);
+            }
+            r[i] = GF::new(0);
+        }
+        Polynomial::new(r)
     }
 
     // Divide-and-conquer product tree for polynomial multiplication, reduced mod f_y
     fn product_tree(factors: &[Self], f_y: &Self) -> Self {
         match factors.len() {
-            0 => Self::new(vec![GF::new(1)]), // empty product = 1
-            1 => factors[0].clone(),          // base case
+            0 => {
+                let mut p = Self::zero();
+                p.coeffs[0] = GF::new(1);
+                p
+            } // empty product = 1
+            1 => factors[0], // base case
             _ => {
                 // split down the middle
                 let mid = factors.len() / 2;
@@ -208,7 +222,7 @@ impl<const M: u8> Polynomial<M> {
                 let right = Self::product_tree(&factors[mid..], f_y);
                 // multiply and reduce mod f_y
                 let prod = &left * &right;
-                prod.reduce(f_y)
+                prod.reduce(f_y, f_y.deg())
             }
         }
     }
@@ -219,10 +233,16 @@ impl<const M: u8> Polynomial<M> {
     ) -> Vec<Self> {
         // outer poly coefficients
         match factors.len() {
-            0 => vec![Self::new(vec![GF::new(1)])],
+            0 => {
+                let mut p = Self::zero();
+                p.coeffs[0] = GF::new(1);
+                vec![p]
+            }
             1 => {
                 // (X + conj) = [conj, 1]
-                vec![factors[0].clone(), Self::new(vec![GF::new(1)])]
+                let mut p = Self::zero();
+                p.coeffs[0] = GF::new(1);
+                vec![factors[0], p]
             }
             _ => {
                 let mid = factors.len() / 2;
@@ -231,17 +251,16 @@ impl<const M: u8> Polynomial<M> {
 
                 // multiply left and right as outer polynomials
                 // reuse your existing loop logic, just extracted here
-                let zero = Self::new(vec![GF::new(0)]);
-                let mut res = vec![zero; left.len() + right.len() - 1];
+                let mut res = vec![Self::zero(); left.len() + right.len() - 1];
                 for (i, ca) in left.iter().enumerate() {
                     for (j, cb) in right.iter().enumerate() {
                         let prod = ca * cb;
-                        let rem = Self::reduce(&prod, f_y);
+                        let rem = Self::reduce(&prod, f_y, f_y.deg());
+
                         let r = &mut res[i + j];
-                        let len = r.coeffs.len().max(rem.coeffs.len());
-                        r.coeffs.resize(len, GF::new(0));
-                        for (k, &c) in rem.coeffs.iter().enumerate() {
-                            r.coeffs[k] = r.coeffs[k] + c;
+
+                        for k in 0..N {
+                            r.coeffs[k] = r.coeffs[k] + rem.coeffs[k];
                         }
                     }
                 }
@@ -253,20 +272,19 @@ impl<const M: u8> Polynomial<M> {
     // Square a polynomial in characteristic 2, reduced mod f.
     // (sum a_i * y^i)^2 = sum a_i^2 * y^(2i)  -- cross terms vanish
     fn frobenius_sq(p: &Self, f: &Self) -> Self {
-        let deg = p.coeffs.len();
-        let mut res = vec![GF::new(0); 2 * deg - 1];
-        for (i, &c) in p.coeffs.iter().enumerate() {
-            res[2 * i] = c.sq(); // squaring each GF element, coefficients go to even positions
+        let deg = p.deg();
+        let mut res = Self::zero();
+        for i in 0..=deg {
+            res.coeffs[2 * i] = p.coeffs[i].sq(); // squaring each GF element, coefficients go to even positions
         }
-        let r = Polynomial::new(res);
-        r.reduce(f)
+        res.reduce(f, f.deg())
     }
 
     // Apply Frobenius: p -> p^(2^M) mod f
     // Instead of mod_pow(2^M, f) which does 2^M iterations,
     // we do M squarings — from 8192 iterations down to 13.
     fn frobenius(&self, f: &Self) -> Self {
-        let mut result = self.clone();
+        let mut result = *self;
         for _ in 0..M {
             result = Polynomial::frobenius_sq(&result, f);
         }
@@ -276,13 +294,12 @@ impl<const M: u8> Polynomial<M> {
     pub fn minpoly(&self, f_y: &Self) -> Self {
         // Collect conjugates via Frobenius: beta, beta^q, beta^(q^2), ...
         let mut conjugates: Vec<Self> = Vec::new();
-        let mut current = self.clone();
+        let mut current = *self;
         loop {
             if conjugates.iter().any(|c| c == &current) {
                 break;
             }
             conjugates.push(current.clone());
-            // current = current.mod_pow(q, f_y);
             current = current.frobenius(f_y);
         }
 
@@ -291,22 +308,26 @@ impl<const M: u8> Polynomial<M> {
 
         // At this point acc[i] should each be a degree-0 polynomial (a scalar in GF<M>)
         // because minpoly lands back in GF(2^M)[y] — extract those scalars
-        let scalar_coeffs: Vec<GF<M>> = acc
-            .iter()
-            .map(|p| p.coeffs.get(0).copied().unwrap_or(GF::new(0)))
-            .collect();
+        let mut result = Self::zero();
+        let len = acc.len().min(N);
+        for i in 0..len {
+            result.coeffs[i] = acc[i].coeffs[0];
+        }
 
-        let mut result = Polynomial::new(scalar_coeffs);
-        result.clean();
+        result.make_monic();
+
         result
     }
 
     // Extended Euclidean algorithm for polynomial inversion modulo f
     pub fn inv_mod(&self, f: &Self) -> Option<Self> {
-        let mut t = Self::new(vec![GF::new(0)]);
-        let mut newt = Self::new(vec![GF::new(1)]);
-        let mut r = f.clone();
-        let mut newr = self.clone();
+        let mut t = Self::zero();
+        let mut newt = Self::zero();
+        newt.coeffs[0] = GF::new(1);
+
+        let mut r = *f;
+        let mut newr = *self;
+
         while !newr.is_zero() {
             let (q, rem) = Self::div_rem(&r, &newr);
             r = newr;
@@ -314,17 +335,11 @@ impl<const M: u8> Polynomial<M> {
 
             // next_t = t - q * newt
             let q_newt = &q * &newt;
-            let len = std::cmp::max(t.coeffs.len(), q_newt.coeffs.len());
-            let mut next_t_coeffs = vec![GF::new(0); len];
-            for (i, c) in t.coeffs.iter().enumerate() {
-                next_t_coeffs[i] = *c;
-            }
-            for (i, c) in q_newt.coeffs.iter().enumerate() {
-                next_t_coeffs[i] = next_t_coeffs[i] + *c;
-            }
+            let mut next_t = Self::zero();
 
-            let mut next_t = Self::new(next_t_coeffs);
-            next_t.clean();
+            for i in 0..N {
+                next_t.coeffs[i] = t.coeffs[i] + q_newt.coeffs[i];
+            }
 
             t = newt;
             newt = next_t;
@@ -335,14 +350,16 @@ impl<const M: u8> Polynomial<M> {
         }
 
         let scalar_inv = r.coeffs[0].inv();
-        for c in &mut t.coeffs {
-            *c = *c * scalar_inv;
+
+        for i in 0..=t.deg() {
+            t.coeffs[i] = t.coeffs[i] * scalar_inv;
         }
+
         Some(t)
     }
 }
 
-impl<const M: u8> Index<usize> for Polynomial<M> {
+impl<const M: u8, const N: usize> Index<usize> for Polynomial<M, N> {
     type Output = GF<M>;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -350,22 +367,24 @@ impl<const M: u8> Index<usize> for Polynomial<M> {
     }
 }
 
-impl<const M: u8> Mul for &Polynomial<M> {
-    type Output = Polynomial<M>;
+impl<const M: u8, const N: usize> Mul for &Polynomial<M, N> {
+    type Output = Polynomial<M, N>;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        let mut res = vec![GF::new(0); self.coeffs.len() + rhs.coeffs.len() - 1];
-
-        for i in 0..self.coeffs.len() {
-            for j in 0..rhs.coeffs.len() {
-                res[i + j] = res[i + j] + (self[i] * rhs[j]);
+        let mut res = Polynomial::<M, N>::zero();
+        let deg_a = self.deg();
+        let deg_b = rhs.deg();
+        if self.is_zero() || rhs.is_zero() {
+            return res;
+        }
+        for i in 0..=deg_a {
+            for j in 0..=deg_b {
+                if i + j < N {
+                    res.coeffs[i + j] = res.coeffs[i + j] + (self[i] * rhs[j]);
+                }
             }
         }
-
-        let mut res_poly = Polynomial::new(res);
-        res_poly.clean();
-
-        res_poly
+        res
     }
 }
 
@@ -375,26 +394,18 @@ mod tests {
     use crate::gf::GF;
 
     type TestGF = GF<13>;
-    type TestPoly = Polynomial<13>;
+    type TestPoly = Polynomial<13, 256>;
     const T: usize = 96;
 
     fn f_y_460896() -> TestPoly {
         // F(y) = y^96 + y^10 + y^9 + y^6 + 1, z = GF<13>(2)
-        let mut coeffs = vec![TestGF::new(0); T + 1];
-        coeffs[0] = TestGF::new(1); // 1
-        coeffs[6] = TestGF::new(1); // y^6
-        coeffs[9] = TestGF::new(1); // y^9
-        coeffs[10] = TestGF::new(1); // y^10
-        coeffs[96] = TestGF::new(1); // y^96
-        TestPoly::new(coeffs)
-    }
-
-    #[test]
-    fn test_poly_macro_and_clean() {
-        let mut p: TestPoly = poly![1, 2, 0, 0];
-        p.clean();
-        assert_eq!(p.deg(), 1);
-        assert_eq!(p.coeffs.len(), 2);
+        let mut test_poly = TestPoly::zero();
+        test_poly.coeffs[0] = TestGF::new(1); // 1
+        test_poly.coeffs[6] = TestGF::new(1); // y^6
+        test_poly.coeffs[9] = TestGF::new(1); // y^9
+        test_poly.coeffs[10] = TestGF::new(1); // y^10
+        test_poly.coeffs[96] = TestGF::new(1); // y^96
+        test_poly
     }
 
     #[test]
@@ -444,15 +455,14 @@ mod tests {
         let f_y = f_y_460896();
 
         // beta = 1 + y + y^2
-        let mut beta_coeffs = vec![TestGF::new(0); 3];
-        beta_coeffs[0] = TestGF::new(1);
-        beta_coeffs[1] = TestGF::new(1);
-        beta_coeffs[2] = TestGF::new(1);
-        let beta = TestPoly::new(beta_coeffs);
+        let mut beta = TestPoly::zero();
+        beta.coeffs[0] = TestGF::new(1);
+        beta.coeffs[1] = TestGF::new(1);
+        beta.coeffs[2] = TestGF::new(1);
 
         let g = beta.minpoly(&f_y);
 
-        assert_eq!(g.coeffs.last().unwrap().0, 1, "minpoly must be monic");
+        assert_eq!(g.coeffs[g.deg()].0, 1, "minpoly must be monic");
         assert!(
             T % g.deg() == 0,
             "deg(g) = {} must divide T = {}",
@@ -468,12 +478,13 @@ mod tests {
         //   substitute beta for y -> g[i] * beta^i
         //   where g[i] is a GF13 scalar  (scales the extension element)
         //   and   beta^i is computed via repeated mul + div_rem mod f_y
-        let mut result = TestPoly::new(vec![TestGF::new(0)]);
-        let mut beta_pow = TestPoly::new(vec![TestGF::new(1)]); // beta^0 = 1
+        let mut result = TestPoly::zero();
+        let mut beta_pow = TestPoly::zero(); // beta^0 = 1
+        beta_pow.coeffs[0] = TestGF::new(1);
 
         for i in 0..=g.deg() {
             let scaled: Vec<TestGF> = beta_pow.coeffs.iter().map(|&c| c * g.coeffs[i]).collect();
-            let scaled_poly = TestPoly::new(scaled);
+            let scaled_poly = TestPoly::from_slice(&scaled);
 
             let len = result.coeffs.len().max(scaled_poly.coeffs.len());
             let mut res = vec![TestGF::new(0); len];
@@ -483,15 +494,13 @@ mod tests {
             for (j, c) in scaled_poly.coeffs.iter().enumerate() {
                 res[j] = res[j] + *c;
             }
-            result = TestPoly::new(res);
-            result.clean();
+            result = TestPoly::from_slice(&res);
 
             let prod = &beta_pow * &beta;
             let (_, rem) = TestPoly::div_rem(&prod, &f_y);
             beta_pow = rem;
         }
 
-        result.clean();
         assert!(
             result.is_zero(),
             "g(beta) must be 0 in GF(2^13), got {:?}",
@@ -514,7 +523,7 @@ mod tests {
         // a(x) * a^-1(x)
         let prod = &a * &inv;
 
-        let rem = TestPoly::reduce(&prod, &f);
+        let rem = TestPoly::reduce(&prod, &f, f.deg());
 
         assert_eq!(rem.deg(), 0, "a(x) * a^-1(x) mod f(x) should have degree 0");
         assert_eq!(rem.coeffs[0].0, 1, "a(x) * a^-1(x) mod f(x) must be 1");

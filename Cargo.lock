@@ -184,6 +184,7 @@ dependencies = [
  "rand",
  "serde",
  "sha3",
+ "subtle",
 ]
 
 [[package]]

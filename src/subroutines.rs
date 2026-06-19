@@ -1,5 +1,7 @@
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+
 use crate::mceliece::{Ciphertext, PrivateKey, PublicKey, SessionKey, SysGF, SysPoly};
-use crate::params::PARAMS;
+use crate::params::{PARAMS, POLY_CAPACITY};
 
 type MatGenRes = (Vec<Vec<u8>>, Vec<SysGF>);
 
@@ -156,50 +158,48 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> Option<Vec<u8>> {
     let sigma_poly = patterson_error_locator(&s_poly, &sk.g)?;
 
     // Step 2.3: Find error positions using the error locator polynomial sigma(x) (Chien Search)
-    let e_vec = chien_search(&sigma_poly, &sk.alphas, n);
+    let (e, is_chien_valid) = chien_search(&sigma_poly, &sk.alphas, n);
 
-    // If no error positions are found, return failure
-    if e_vec.is_none() {
-        return None;
-    }
-    let e = e_vec.unwrap();
-
-    let mut weight = 0;
+    let mut weight = 0usize;
     for i in 0..n {
-        if e[i] == 1 {
-            weight += 1;
-        }
+        weight += e[i] as usize;
     }
 
     // Step 4: If wt(e) = t and C = He, return e. Otherwise return None.
-    if weight != t {
-        return None;
-    }
+    // if weight != t {
+    //     return None;
+    // }
+    // Make it constant-time
+    let is_weight_correct: Choice = weight.ct_eq(&t);
 
     // Verify that C = He
-    if !verify_syndrome(&e, sk, &s_poly) {
+    // if !verify_syndrome(&e, sk, &s_poly) {
+    //     return None;
+    // }
+    // Make it constant-time
+    let is_syndrome_correct: Choice = verify_syndrome(&e, sk, &s_poly);
+
+    let is_valid: Choice = is_weight_correct & is_syndrome_correct & is_chien_valid;
+
+    if is_valid.unwrap_u8() != 1 {
         return None;
     }
-
     Some(e)
 }
 
 fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
-    let mut s_poly = SysPoly::new(vec![SysGF::new(0)]);
+    let mut s_poly = SysPoly::zero();
+
     for j in 0..PARAMS.n {
         if v[j] == 1 {
-            let denom = SysPoly::new(vec![sk.alphas[j], SysGF::new(1)]);
+            let mut denom = SysPoly::zero();
+            denom.coeffs[0] = sk.alphas[j];
+            denom.coeffs[1] = SysGF::new(1);
+
             if let Some(inv) = denom.inv_mod(&sk.g) {
-                let len = std::cmp::max(s_poly.coeffs.len(), inv.coeffs.len());
-                let mut next_s = vec![SysGF::new(0); len];
-                for (i, c) in s_poly.coeffs.iter().enumerate() {
-                    next_s[i] = next_s[i] + *c;
+                for i in 0..POLY_CAPACITY {
+                    s_poly.coeffs[i] = s_poly.coeffs[i] + inv.coeffs[i];
                 }
-                for (i, c) in inv.coeffs.iter().enumerate() {
-                    next_s[i] = next_s[i] + *c;
-                }
-                s_poly = SysPoly::new(next_s);
-                s_poly.clean();
             }
         }
     }
@@ -211,58 +211,54 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
     let t_poly = s_poly.inv_mod(g)?;
 
     // 2. R(x) = T(x) + x mod g(x)
-    let mut r_coeffs = t_poly.coeffs.clone();
-    if r_coeffs.len() < 2 {
-        r_coeffs.resize(2, SysGF::new(0));
-    }
-    r_coeffs[1] = r_coeffs[1] + SysGF::new(1);
-    let mut r_poly = SysPoly::new(r_coeffs);
-    r_poly.clean();
-    r_poly = r_poly.reduce(g);
+    let mut r_poly = t_poly;
+    r_poly.coeffs[1] = r_poly.coeffs[1] + SysGF::new(1);
+    r_poly = r_poly.reduce(g, PARAMS.t);
 
     // 3. Q(x) = sqrt(R(x)) mod g(x)
-    let mut g_even = vec![SysGF::new(0); (g.coeffs.len() + 1) / 2];
-    let mut g_odd = vec![SysGF::new(0); g.coeffs.len() / 2];
-    for (i, &c) in g.coeffs.iter().enumerate() {
+    let mut g_even = SysPoly::zero();
+    let mut g_odd = SysPoly::zero();
+    for i in 0..=g.deg() {
         if i % 2 == 0 {
-            g_even[i / 2] = c.sqrt();
+            g_even.coeffs[i / 2] = g.coeffs[i].sqrt();
         } else {
-            g_odd[i / 2] = c.sqrt();
+            g_odd.coeffs[i / 2] = g.coeffs[i].sqrt();
         }
     }
-    let g_odd_inv = SysPoly::new(g_odd).inv_mod(g)?;
-    let sqrt_x = (&SysPoly::new(g_even) * &g_odd_inv).reduce(g);
+
+    let g_odd_inv = g_odd.inv_mod(g)?;
+    let sqrt_x = (&g_even * &g_odd_inv).reduce(g, PARAMS.t);
 
     // Extract odd and even R(x)
-    let mut r_even = vec![SysGF::new(0); (r_poly.coeffs.len() + 1) / 2];
-    let mut r_odd = vec![SysGF::new(0); r_poly.coeffs.len() / 2];
-    for (i, &c) in r_poly.coeffs.iter().enumerate() {
+    let mut r_even = SysPoly::zero();
+    let mut r_odd = SysPoly::zero();
+    for i in 0..=r_poly.deg() {
         if i % 2 == 0 {
-            r_even[i / 2] = c.sqrt();
+            r_even.coeffs[i / 2] = r_poly.coeffs[i].sqrt();
         } else {
-            r_odd[i / 2] = c.sqrt();
+            r_odd.coeffs[i / 2] = r_poly.coeffs[i].sqrt();
         }
     }
 
     // Q(x) = r_even + sqrt_x * r_odd mod g(x)
-    let prod = &sqrt_x * &SysPoly::new(r_odd);
-    let len = std::cmp::max(prod.coeffs.len(), r_even.len());
-    let mut q_coeffs = vec![SysGF::new(0); len];
-    for (i, c) in prod.coeffs.iter().enumerate() {
-        q_coeffs[i] = q_coeffs[i] + *c;
+    let prod = &sqrt_x * &r_odd;
+    let mut q = SysPoly::zero();
+
+    for i in 0..=prod.deg() {
+        q.coeffs[i] = q.coeffs[i] + prod.coeffs[i];
     }
-    for (i, &c) in r_even.iter().enumerate() {
-        q_coeffs[i] = q_coeffs[i] + c;
+    for i in 0..=r_even.deg() {
+        q.coeffs[i] = q.coeffs[i] + r_even.coeffs[i];
     }
-    let mut q_poly: SysPoly = SysPoly::new(q_coeffs);
-    q_poly.clean();
-    q_poly = q_poly.reduce(g);
+    q = q.reduce(g, PARAMS.t);
 
     // Solve a(x) * Q(x) = b(x) mod g(x) with Extended Euclidean Algorithm
-    let mut a = SysPoly::new(vec![SysGF::new(0)]);
-    let mut newa = SysPoly::new(vec![SysGF::new(1)]);
-    let mut r = g.clone();
-    let mut newr = q_poly;
+    let mut a = SysPoly::zero();
+    let mut newa = SysPoly::zero();
+    newa.coeffs[0] = SysGF::new(1);
+
+    let mut r = *g;
+    let mut newr = q;
     let stop_deg = PARAMS.t / 2;
 
     while newr.deg() > stop_deg {
@@ -271,65 +267,59 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
         newr = rem;
 
         let q_newa = &q_div * &newa;
-        let len = std::cmp::max(q_newa.coeffs.len(), a.coeffs.len());
-        let mut next_a = vec![SysGF::new(0); len];
-        for (i, c) in a.coeffs.iter().enumerate() {
-            next_a[i] = *c;
+        let mut next_a = SysPoly::zero();
+
+        for i in 0..POLY_CAPACITY {
+            next_a.coeffs[i] = a.coeffs[i] + q_newa.coeffs[i];
         }
-        for (i, c) in q_newa.coeffs.iter().enumerate() {
-            next_a[i] = next_a[i] + *c;
-        }
-        let mut next_a_poly = SysPoly::new(next_a);
-        next_a_poly.clean();
 
         a = newa;
-        newa = next_a_poly;
+        newa = next_a;
     }
 
     // 5. sigma(x) = a(x)^2 + x * b(x)^2 (a = newr, b = newa)
-    let mut a_sq = vec![SysGF::new(0); 2 * newr.coeffs.len() - 1];
-    for (i, &c) in newr.coeffs.iter().enumerate() {
-        a_sq[2 * i] = c.sq();
+    let mut sigma = SysPoly::zero();
+    for i in 0..=newr.deg() {
+        sigma.coeffs[2 * i] = newr.coeffs[i].sq();
     }
-
-    let mut x_b_sq = vec![SysGF::new(0); 2 * newa.coeffs.len()];
-    for (i, &c) in newa.coeffs.iter().enumerate() {
-        x_b_sq[2 * i + 1] = c.sq();
+    for i in 0..=newa.deg() {
+        sigma.coeffs[2 * i + 1] = newa.coeffs[i].sq();
     }
-
-    let len = std::cmp::max(a_sq.len(), x_b_sq.len());
-    let mut sigma_coeffs = vec![SysGF::new(0); len];
-    for (i, &c) in a_sq.iter().enumerate() {
-        sigma_coeffs[i] = sigma_coeffs[i] + c;
-    }
-    for (i, &c) in x_b_sq.iter().enumerate() {
-        sigma_coeffs[i] = sigma_coeffs[i] + c;
-    }
-
-    let mut sigma = SysPoly::new(sigma_coeffs);
-    sigma.clean();
 
     Some(sigma)
 }
 
-fn chien_search(sigma: &SysPoly, alphas: &[SysGF], n: usize) -> Option<Vec<u8>> {
+// Returns (c_vec, is_valid) (for constant time concerns)
+fn chien_search(sigma: &SysPoly, alphas: &[SysGF], n: usize) -> (Vec<u8>, Choice) {
     let mut c_vec = vec![0u8; n];
     let mut root_count = 0;
     for j in 0..n {
-        if sigma.eval(alphas[j]).0 == 0 {
-            c_vec[j] = 1;
-            root_count += 1;
-        }
+        let eval_res = sigma.eval(alphas[j]).0;
+        let is_root: Choice = eval_res.ct_eq(&0);
+        c_vec[j] = u8::conditional_select(&0, &1, is_root);
+        root_count += is_root.unwrap_u8() as usize;
     }
-    if root_count != PARAMS.t {
-        return None;
-    }
-    Some(c_vec)
+    let is_valid = root_count.ct_eq(&PARAMS.t);
+    (c_vec, is_valid)
 }
 
-fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> bool {
+fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> Choice {
     let e_syndrome = compute_syndrome(e, sk);
-    e_syndrome.coeffs == s_poly.coeffs
+    let mut is_equal = Choice::from(1u8);
+    for i in 0..PARAMS.t {
+        let c1 = if i < e_syndrome.coeffs.len() {
+            e_syndrome.coeffs[i].0
+        } else {
+            0
+        };
+        let c2 = if i < s_poly.coeffs.len() {
+            s_poly.coeffs[i].0
+        } else {
+            0
+        };
+        is_equal = is_equal & c1.ct_eq(&c2);
+    }
+    is_equal
 }
 
 #[cfg(test)]
@@ -375,7 +365,7 @@ mod tests {
         let m = PARAMS.m as usize;
         let n = PARAMS.n;
 
-        let g = Polynomial::new(vec![GF::new(1); t + 1]);
+        let g = Polynomial::from_slice(&[GF::new(1); PARAMS.t + 1]);
 
         let mut alphas = Vec::with_capacity(n);
         for i in 0..n {
