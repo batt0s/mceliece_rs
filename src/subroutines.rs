@@ -108,10 +108,9 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
 
     // 2. C = C xor T_j for each j such that e_{mt+j} = 1 (C = C + T * e_2)
     for j in 0..k {
-        if e[mt + j] == 1 {
-            for i in 0..mt {
-                c_bits[i] ^= pk.T[i][j];
-            }
+        let mask = 0u8.wrapping_sub(e[mt + j]);
+        for i in 0..mt {
+            c_bits[i] ^= pk.T[i][j] & mask;
         }
     }
 
@@ -123,9 +122,7 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
 pub fn pack_bits(bits: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0u8; (bits.len() + 7) / 8];
     for (i, &bit) in bits.iter().enumerate() {
-        if bit == 1 {
-            bytes[i / 8] |= 1 << (i % 8);
-        }
+        bytes[i / 8] |= bit << (i % 8);
     }
     bytes
 }
@@ -191,16 +188,20 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
     let mut s_poly = SysPoly::zero();
 
     for j in 0..PARAMS.n {
-        if v[j] == 1 {
-            let mut denom = SysPoly::zero();
-            denom.coeffs[0] = sk.alphas[j];
-            denom.coeffs[1] = SysGF::new(1);
+        let mut denom = SysPoly::zero();
+        denom.coeffs[0] = sk.alphas[j];
+        denom.coeffs[1] = SysGF::new(1);
 
-            if let Some(inv) = denom.inv_mod(&sk.g) {
-                for i in 0..POLY_CAPACITY {
-                    s_poly.coeffs[i] = s_poly.coeffs[i] + inv.coeffs[i];
-                }
-            }
+        let inv = denom.inv_mod(&sk.g, PARAMS.t).unwrap();
+
+        let mask = Choice::from(v[j]);
+
+        for i in 0..POLY_CAPACITY {
+            s_poly.coeffs[i] = SysGF::conditional_select(
+                &s_poly.coeffs[i],
+                &(s_poly.coeffs[i] + inv.coeffs[i]),
+                mask,
+            );
         }
     }
     s_poly
@@ -208,7 +209,7 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
 
 fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
     // 1. T(x) = S(x)^-1 mod g(x)
-    let t_poly = s_poly.inv_mod(g)?;
+    let t_poly = s_poly.inv_mod(g, PARAMS.t)?;
 
     // 2. R(x) = T(x) + x mod g(x)
     let mut r_poly = t_poly;
@@ -226,7 +227,7 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
         }
     }
 
-    let g_odd_inv = g_odd.inv_mod(g)?;
+    let g_odd_inv = g_odd.inv_mod(g, PARAMS.t)?;
     let sqrt_x = (&g_even * &g_odd_inv).reduce(g, PARAMS.t);
 
     // Extract odd and even R(x)
@@ -252,37 +253,15 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
     }
     q = q.reduce(g, PARAMS.t);
 
-    // Solve a(x) * Q(x) = b(x) mod g(x) with Extended Euclidean Algorithm
-    let mut a = SysPoly::zero();
-    let mut newa = SysPoly::zero();
-    newa.coeffs[0] = SysGF::new(1);
-
-    let mut r = *g;
-    let mut newr = q;
-    let stop_deg = PARAMS.t / 2;
-
-    while newr.deg() > stop_deg {
-        let (q_div, rem) = SysPoly::div_rem(&r, &newr);
-        r = newr;
-        newr = rem;
-
-        let q_newa = &q_div * &newa;
-        let mut next_a = SysPoly::zero();
-
-        for i in 0..POLY_CAPACITY {
-            next_a.coeffs[i] = a.coeffs[i] + q_newa.coeffs[i];
-        }
-
-        a = newa;
-        newa = next_a;
-    }
+    // Solve a(x) * Q(x) = b(x) mod g(x) with Constant Time Extended Euclidean Algorithm
+    let (newr, newa) = ct_patterson_eea(g, &q);
 
     // 5. sigma(x) = a(x)^2 + x * b(x)^2 (a = newr, b = newa)
     let mut sigma = SysPoly::zero();
-    for i in 0..=newr.deg() {
+    let stop_deg = PARAMS.t / 2;
+
+    for i in 0..=stop_deg {
         sigma.coeffs[2 * i] = newr.coeffs[i].sq();
-    }
-    for i in 0..=newa.deg() {
         sigma.coeffs[2 * i + 1] = newa.coeffs[i].sq();
     }
 
@@ -320,6 +299,149 @@ fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> Choice {
         is_equal = is_equal & c1.ct_eq(&c2);
     }
     is_equal
+}
+
+// Constant time bitonic sort
+pub fn ct_sort(arr: &mut [(u32, u32)]) {
+    let n = arr.len();
+    let mut k = 2;
+
+    while k <= n {
+        let mut j = k / 2;
+        while j > 0 {
+            for i in 0..n {
+                let l = i ^ j;
+                if l > i {
+                    let dir = (i & k) == 0;
+
+                    let a_val = arr[i].0;
+                    let b_val = arr[l].0;
+
+                    // is b_val greater than a_val?
+                    let (_, borrow) = b_val.overflowing_sub(a_val);
+                    let is_greater = Choice::from(borrow as u8);
+
+                    let mut should_swap = is_greater;
+                    if !dir {
+                        should_swap = !should_swap;
+                    }
+
+                    let temp_val_i = u32::conditional_select(&arr[i].0, &arr[l].0, should_swap);
+                    let temp_val_l = u32::conditional_select(&arr[l].0, &arr[i].0, should_swap);
+
+                    let temp_idx_i = u32::conditional_select(&arr[i].1, &arr[l].1, should_swap);
+                    let temp_idx_l = u32::conditional_select(&arr[l].1, &arr[i].1, should_swap);
+
+                    arr[i] = (temp_val_i, temp_idx_i);
+                    arr[l] = (temp_val_l, temp_idx_l);
+                }
+            }
+            j /= 2;
+        }
+        k *= 2;
+    }
+}
+
+// Constant Time Patterson EEA
+pub fn ct_patterson_eea(g: &SysPoly, q: &SysPoly) -> (SysPoly, SysPoly) {
+    let mut r0 = *g;
+    let mut r1 = *q;
+
+    let mut a0 = SysPoly::zero();
+    let mut a1 = SysPoly::zero();
+    a1.coeffs[0] = SysGF::new(1);
+
+    // save snapshot value to find out when to stop
+    let mut saved_a = SysPoly::zero();
+    let mut saved_r = SysPoly::zero();
+    let mut has_saved = Choice::from(0);
+
+    let stop_deg = PARAMS.t / 2;
+
+    // Maximum number of iterations is 2 * t
+    for _ in 0..(2 * PARAMS.t) {
+        let deg_r0 = r0.deg();
+        let deg_r1 = r1.deg();
+
+        // 1. Save snapshot: save for the first time if deg(r0) falls below stop_deg
+        let is_r0_ready = Choice::from((deg_r0 <= stop_deg) as u8);
+        let should_save = is_r0_ready & !has_saved;
+
+        for i in 0..POLY_CAPACITY {
+            saved_r.coeffs[i] =
+                SysGF::conditional_select(&saved_r.coeffs[i], &r0.coeffs[i], should_save);
+            saved_a.coeffs[i] =
+                SysGF::conditional_select(&saved_a.coeffs[i], &a0.coeffs[i], should_save);
+        }
+        has_saved = has_saved | should_save;
+
+        // 2. CT Swap: if deg(r0) < deg(r1), swap
+        let is_r0_lesser = Choice::from((deg_r0 < deg_r1) as u8);
+        let is_r1_zero = r1.is_zero();
+        let do_swap = is_r0_lesser & !is_r1_zero;
+
+        SysPoly::swap(&mut r0, &mut r1, do_swap);
+        SysPoly::swap(&mut a0, &mut a1, do_swap);
+
+        let deg_r0 = r0.deg();
+        let deg_r1 = r1.deg();
+        let diff = deg_r0 - deg_r1;
+
+        // 3. lead_r0 * lead_r1^-1
+        let lead_r0 = r0.lead();
+        let lead_r1 = r1.lead();
+        let safe_lead_r1 = SysGF::conditional_select(&lead_r1, &SysGF::new(1), is_r1_zero);
+        let mutliplier = lead_r0 * safe_lead_r1.inv();
+
+        let mut shifted_r1 = r1;
+        let mut shifted_a1 = a1;
+
+        for i in 0..POLY_CAPACITY {
+            shifted_r1.coeffs[i] = shifted_r1.coeffs[i] * mutliplier;
+            shifted_a1.coeffs[i] = shifted_a1.coeffs[i] * mutliplier;
+        }
+
+        // 4. Shift the polynomial left
+        for step in 0..PARAMS.t {
+            let should_shift = Choice::from((step < diff) as u8);
+
+            let mut next_r1 = SysPoly::zero();
+            let mut next_a1 = SysPoly::zero();
+
+            next_r1.coeffs[0] =
+                SysGF::conditional_select(&shifted_r1.coeffs[0], &SysGF::new(0), should_shift);
+            next_a1.coeffs[0] =
+                SysGF::conditional_select(&shifted_a1.coeffs[0], &SysGF::new(0), should_shift);
+
+            for i in 1..POLY_CAPACITY {
+                next_r1.coeffs[i] = SysGF::conditional_select(
+                    &shifted_r1.coeffs[i],
+                    &shifted_r1.coeffs[i - 1],
+                    should_shift,
+                );
+                next_a1.coeffs[i] = SysGF::conditional_select(
+                    &shifted_a1.coeffs[i],
+                    &shifted_a1.coeffs[i - 1],
+                    should_shift,
+                );
+            }
+
+            shifted_r1 = next_r1;
+            shifted_a1 = next_a1;
+        }
+
+        // 5. r0 = r0 - shifted_r1
+        let apply_sub = !is_r1_zero;
+        for i in 0..POLY_CAPACITY {
+            let new_r0_coeff = r0.coeffs[i] + shifted_r1.coeffs[i];
+            let new_a0_coeff = a0.coeffs[i] + shifted_a1.coeffs[i];
+
+            r0.coeffs[i] = SysGF::conditional_select(&r0.coeffs[i], &new_r0_coeff, apply_sub);
+            a0.coeffs[i] = SysGF::conditional_select(&a0.coeffs[i], &new_a0_coeff, apply_sub);
+        }
+    }
+
+    (saved_r, saved_a)
 }
 
 #[cfg(test)]

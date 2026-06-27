@@ -1,5 +1,6 @@
 use crate::gf::GF;
 use std::ops::{Index, Mul};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 // Macro for creating polynomials
 macro_rules! poly {
@@ -39,17 +40,57 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         Polynomial { coeffs }
     }
 
+    // Constant time degree calculation
     pub fn deg(&self) -> usize {
+        let mut res = 0u32;
+        let mut found = Choice::from(0);
         for i in (0..N).rev() {
-            if self.coeffs[i].0 != 0 {
-                return i;
-            }
+            let is_nonzero = !self.coeffs[i].ct_eq(&GF::new(0));
+            let update = is_nonzero & !found;
+            res = u32::conditional_select(&res, &(i as u32), update);
+            found = found | is_nonzero;
         }
-        0
+        res as usize
     }
 
-    pub fn is_zero(&self) -> bool {
-        self.deg() == 0 && self.coeffs[0].0 == 0
+    pub fn lead(&self) -> GF<M> {
+        let mut leading = GF::new(0);
+        let mut found = Choice::from(0);
+        for i in (0..N).rev() {
+            let is_nonzero = !self.coeffs[i].ct_eq(&GF::new(0));
+            let update = is_nonzero & !found;
+
+            leading = GF::conditional_select(&leading, &self.coeffs[i], update);
+            found = found | is_nonzero;
+        }
+        leading
+    }
+
+    pub fn is_zero(&self) -> Choice {
+        let mut res = Choice::from(1);
+        for i in 0..N {
+            res = res & self.coeffs[i].ct_eq(&GF::new(0));
+        }
+        res
+    }
+
+    #[inline(always)]
+    pub fn swap(a: &mut Self, b: &mut Self, choice: Choice) {
+        for i in 0..N {
+            let temp_a = GF::conditional_select(&a.coeffs[i], &b.coeffs[i], choice);
+            let temp_b = GF::conditional_select(&b.coeffs[i], &a.coeffs[i], choice);
+            a.coeffs[i] = temp_a;
+            b.coeffs[i] = temp_b;
+        }
+    }
+
+    // Shifts all coefficients down by one position, with the last coefficient set to zero (i.e., the polynomial is divided by x)
+    #[inline(always)]
+    pub fn shift_down(&mut self) {
+        for i in 0..N - 1 {
+            self.coeffs[i] = self.coeffs[i + 1];
+        }
+        self.coeffs[N - 1] = GF::new(0);
     }
 
     // Horner's method for polynomial evaluation
@@ -61,96 +102,144 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         res
     }
 
+    // Constant time monic normalization
     pub fn make_monic(&mut self) {
-        if self.is_zero() {
-            return;
+        let mut leading = GF::new(0);
+        let mut found = Choice::from(0);
+
+        // Find the leading coefficient (without using array indexing that cause cache-timing attacks)
+        for i in (0..N).rev() {
+            let is_nonzero = !self.coeffs[i].ct_eq(&GF::new(0));
+            let update = is_nonzero & !found;
+            leading = GF::conditional_select(&leading, &self.coeffs[i], update);
+            found = found | is_nonzero;
         }
-        let leading = self.coeffs[self.deg()];
-        if leading.0 != 1 {
-            let inv = leading.inv();
-            for i in 0..=self.deg() {
-                self.coeffs[i] = self.coeffs[i] * inv;
-            }
+
+        // If the leading coefficient is zero, mask it to avoid division by zero
+        let is_poly_zero = !found;
+        let safe_leading = GF::conditional_select(&leading, &GF::new(1), is_poly_zero);
+        let inv = safe_leading.inv();
+
+        // Multiply each coefficient by the inverse of the leading coefficient to normalize the polynomial
+        for i in 0..N {
+            self.coeffs[i] = self.coeffs[i] * inv;
         }
     }
 
     pub fn div_rem(dividend: &Self, divisor: &Self) -> (Self, Self) {
         let mut rem = *dividend;
-        let div = *divisor;
+        let mut div = *divisor;
 
-        if div.is_zero() {
+        if div.is_zero().unwrap_u8() == 1 {
             panic!("divisor is zero");
         }
 
-        // If the degree of the remainder is less than the degree of the divisor, return 0 and the remainder
-        if rem.deg() < div.deg() {
-            return (Self::zero(), rem);
+        let rem_deg = rem.deg();
+        let div_deg = div.deg();
+
+        if rem_deg < div_deg {
+            return (Self::zero(), *dividend);
         }
 
-        let mut q_coeffs = [GF::new(0); N];
+        let mut q = Self::zero();
+        let div_lead_inv = div.coeffs[div_deg].inv();
 
-        let div_lead_inv = div.coeffs[div.deg()].inv();
+        while rem.is_zero().unwrap_u8() == 0 && rem.deg() >= div.deg() {
+            let cur_rem_deg = rem.deg();
+            let cur_div_deg = div.deg();
+            let deg_diff = cur_rem_deg - cur_div_deg;
 
-        while !rem.is_zero() && rem.deg() >= div.deg() {
-            let deg_diff = rem.deg() - div.deg();
-            let rem_lead = rem.coeffs[rem.deg()];
-
+            let rem_lead = rem.coeffs[cur_rem_deg];
             let ratio = rem_lead * div_lead_inv;
 
             if deg_diff < N {
-                q_coeffs[deg_diff] = ratio;
+                q.coeffs[deg_diff] = ratio;
             }
 
-            // Remainder = Remainder - (ration * divisor) [in XOR (+) and (-) is the same]
             for i in 0..N {
                 if deg_diff + i < N {
-                    rem.coeffs[deg_diff + i] = rem.coeffs[deg_diff + i] + (div.coeffs[i] * ratio);
+                    rem.coeffs[deg_diff + i] = rem.coeffs[deg_diff + i] + (ratio * div.coeffs[i]);
                 }
             }
         }
 
-        let q = Polynomial::new(q_coeffs);
+        (q, rem)
+    }
+
+    // Constant time polynomial division with remainder
+    // The divisor must be monic and the divisor must be non-zero
+    // d is the degree of the divisor
+    pub fn ct_div_rem(dividend: &Self, divisor: &Self, d: usize) -> (Self, Self) {
+        let mut rem = *dividend;
+        let mut q = Self::zero();
+
+        for i in (d..N).rev() {
+            let coef = rem.coeffs[i];
+            q.coeffs[i - d] = coef;
+
+            // Subtract coef * divisor * x^(i-d) from the remainder
+            for j in 0..d {
+                rem.coeffs[i - d + j] = rem.coeffs[i - d + j] + (divisor.coeffs[j] * coef);
+            }
+
+            rem.coeffs[i] = GF::new(0);
+        }
 
         (q, rem)
     }
 
-    // Handbook of Applied Cryptography, Algorithm 2.218, Euclidean Algorithm for Z_p[x]
-    // INPUT: two polynomials g and h over Z_p[x]
-    // OUTPUT: the greatest common divisor of g and h
-    pub fn gcd(g: &Self, h: &Self) -> Self {
-        let mut g = *g;
-        let mut h = *h;
-        while !h.is_zero() {
-            let (_, r) = Self::div_rem(&g, &h);
-            g = h;
-            h = r;
+    // Bernstein-Yang SafeGCD algorithm for constant-time polynomial GCD computation (Paper Chapter 3)
+    pub fn gcd(a: &Self, b: &Self, max_deg: usize) -> Self {
+        let mut f = *a;
+        let mut g = *b;
+        let mut delta = 1i32;
+
+        for _ in 0..=(2 * max_deg) {
+            let delta_gt_0 = Choice::from(u8::from(delta > 0));
+            let g0_not_0 = !g.coeffs[0].ct_eq(&GF::new(0));
+            let cond = delta_gt_0 & g0_not_0;
+
+            let neg_delta = -delta;
+            delta = i32::conditional_select(&delta, &neg_delta, cond) + 1;
+
+            Self::swap(&mut f, &mut g, cond);
+
+            let f0 = f.coeffs[0];
+            let g0 = g.coeffs[0];
+
+            let mut g_new = Self::zero();
+            for i in 0..N {
+                g_new.coeffs[i] = (f0 * g.coeffs[i]) + (g0 * f.coeffs[i]);
+            }
+            g_new.shift_down();
+
+            g = g_new;
         }
-        g.make_monic();
-        g
+        f.make_monic();
+
+        f
     }
 
     // Handbook of Applied Cryptography, Algorithm 2.227, Repeated square-and-multiply algorithm for exponentiation in F_q^m
     // INPUT: a polynomial g in F_q^m (&self), and an integer 0 <= k < p^m - 1 (where F_q^m = Z_p[x]/f)
     // OUTPUT: the result of g^k mod f
-    pub fn mod_pow(&self, mut k: usize, f: &Self) -> Self {
+    pub fn mod_pow(&self, mut k: usize, f: &Self, f_deg: usize) -> Self {
         let mut s = Self::zero();
         s.coeffs[0] = GF(1);
         if k == 0 {
             return s;
         }
 
-        let (_, mut g_x) = Self::div_rem(self, f);
+        let mut g_x = self.reduce(f, f_deg);
 
         while k > 0 {
             if k & 1 == 1 {
                 let prod = &s * &g_x;
-                let (_, rem) = Self::div_rem(&prod, f);
-                s = rem;
+                s = prod.reduce(f, f_deg);
             }
 
             let sq = &g_x * &g_x;
-            let (_, rem) = Self::div_rem(&sq, f);
-            g_x = rem;
+            g_x = sq.reduce(f, f_deg);
 
             k >>= 1;
         }
@@ -161,40 +250,35 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     // Handbook of Applied Cryptography, Algorithm 4.69, Testing a polynomial for irreducibility (Ben-Or)
     // INPUT: a prime p and a monic polynomial f of degree m over Z_p[x]
     // OUTPUT: an answer to the question "is f irreducible over Z_p[x]?"
-    pub fn is_irreducible(&self) -> bool {
-        if self.is_zero() || self.deg() == 0 {
-            return false;
-        }
-
+    // The algorithm is modified from the original to make it constant time
+    pub fn is_irreducible(&self, expected_deg: usize) -> Choice {
         let mut u = Self::zero();
         u.coeffs[1] = GF::new(1);
-
         let q = 1usize << (M as usize);
 
-        for _ in 1..=(self.deg() / 2) {
-            u = u.mod_pow(q, self);
+        let mut is_irred = Choice::from(1);
+
+        for _ in 1..=(expected_deg / 2) {
+            u = u.mod_pow(q, self, expected_deg);
 
             let mut u_minus_x = u;
             u_minus_x.coeffs[1] = u_minus_x.coeffs[1] + GF::new(1);
 
-            let d = Polynomial::gcd(&u_minus_x, self);
+            let d = Self::gcd(&u_minus_x, self, expected_deg);
 
-            if d.deg() > 0 {
-                return false;
-            }
+            let deg_is_zero = Choice::from((d.deg() == 0) as u8);
+            is_irred = is_irred & deg_is_zero;
         }
 
-        true
+        let correct_deg = Choice::from((self.deg() == expected_deg) as u8);
+
+        is_irred & correct_deg
     }
 
     // constant time reduce
     // self mod f
     pub fn reduce(&self, f: &Self, t: usize) -> Self {
         let mut r = self.coeffs;
-        if self.deg() < t {
-            return Polynomial::new(r);
-        }
-
         for i in (t..N).rev() {
             let c = r[i];
             for j in 0..t {
@@ -291,15 +375,13 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         result
     }
 
-    pub fn minpoly(&self, f_y: &Self) -> Self {
+    pub fn minpoly(&self, f_y: &Self, expected_deg: usize) -> Self {
         // Collect conjugates via Frobenius: beta, beta^q, beta^(q^2), ...
-        let mut conjugates: Vec<Self> = Vec::new();
+        let mut conjugates: Vec<Self> = Vec::with_capacity(expected_deg);
         let mut current = *self;
-        loop {
-            if conjugates.iter().any(|c| c == &current) {
-                break;
-            }
-            conjugates.push(current.clone());
+
+        for _ in 0..expected_deg {
+            conjugates.push(current);
             current = current.frobenius(f_y);
         }
 
@@ -315,47 +397,70 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
 
         result.make_monic();
-
         result
     }
 
-    // Extended Euclidean algorithm for polynomial inversion modulo f
-    pub fn inv_mod(&self, f: &Self) -> Option<Self> {
-        let mut t = Self::zero();
-        let mut newt = Self::zero();
-        newt.coeffs[0] = GF::new(1);
+    // Bernstein-Yang SafeGCD algorithm for polynomial inversion modulo f (A^-1 mod M)
+    pub fn inv_mod(&self, m: &Self, max_deg: usize) -> Option<Self> {
+        let mut f = *m;
+        let mut g = *self;
 
-        let mut r = *f;
-        let mut newr = *self;
+        let mut v = Self::zero();
+        let mut r = Self::zero();
+        r.coeffs[0] = GF::new(1);
 
-        while !newr.is_zero() {
-            let (q, rem) = Self::div_rem(&r, &newr);
-            r = newr;
-            newr = rem;
+        let mut delta = 1i32;
 
-            // next_t = t - q * newt
-            let q_newt = &q * &newt;
-            let mut next_t = Self::zero();
+        let m0_inv = m.coeffs[0].inv();
 
+        for _ in 0..=(2 * max_deg) {
+            let delta_gt_0 = Choice::from(u8::from(delta > 0));
+            let g0_not_zero = !g.coeffs[0].ct_eq(&GF::new(0));
+            let cond = delta_gt_0 & g0_not_zero;
+
+            let neg_delta = -delta;
+            delta = i32::conditional_select(&delta, &neg_delta, cond) + 1;
+
+            Self::swap(&mut f, &mut g, cond);
+            Self::swap(&mut v, &mut r, cond);
+
+            let f0 = f.coeffs[0];
+            let g0 = g.coeffs[0];
+
+            let mut g_new = Self::zero();
+            let mut r_new = Self::zero();
             for i in 0..N {
-                next_t.coeffs[i] = t.coeffs[i] + q_newt.coeffs[i];
+                g_new.coeffs[i] = (f0 * g.coeffs[i]) + (g0 * f.coeffs[i]);
+                r_new.coeffs[i] = (f0 * r.coeffs[i]) + (g0 * v.coeffs[i]);
             }
+            g_new.shift_down();
 
-            t = newt;
-            newt = next_t;
+            let c = r_new.coeffs[0] * m0_inv;
+            for i in 0..N {
+                r_new.coeffs[i] = (c * m.coeffs[i]) + r_new.coeffs[i];
+            }
+            r_new.shift_down();
+
+            g = g_new;
+            r = r_new;
         }
 
-        if r.deg() > 0 {
-            return None;
+        let f0_final = f.coeffs[0];
+        let is_invertible = !f0_final.ct_eq(&GF::new(0));
+
+        let safe_f0 = GF::conditional_select(&f0_final, &GF::new(1), !is_invertible);
+        let safe_f0_inv = safe_f0.inv();
+
+        let mut inverse = Self::zero();
+        for i in 0..N {
+            inverse.coeffs[i] = v.coeffs[i] * safe_f0_inv;
         }
 
-        let scalar_inv = r.coeffs[0].inv();
-
-        for i in 0..=t.deg() {
-            t.coeffs[i] = t.coeffs[i] * scalar_inv;
+        if is_invertible.unwrap_u8() == 1 {
+            Some(inverse)
+        } else {
+            None
         }
-
-        Some(t)
     }
 }
 
@@ -372,18 +477,15 @@ impl<const M: u8, const N: usize> Mul for &Polynomial<M, N> {
 
     fn mul(self, rhs: Self) -> Self::Output {
         let mut res = Polynomial::<M, N>::zero();
-        let deg_a = self.deg();
-        let deg_b = rhs.deg();
-        if self.is_zero() || rhs.is_zero() {
-            return res;
-        }
-        for i in 0..=deg_a {
-            for j in 0..=deg_b {
+
+        for i in 0..N {
+            for j in 0..N {
                 if i + j < N {
                     res.coeffs[i + j] = res.coeffs[i + j] + (self[i] * rhs[j]);
                 }
             }
         }
+
         res
     }
 }
@@ -422,14 +524,23 @@ mod tests {
         let q: TestPoly = poly![1, 1]; // x + 1
         let (div, rem) = TestPoly::div_rem(&p, &q);
         assert_eq!(div, poly![1, 0, 1]); // x^2 + 1
-        assert!(rem.is_zero());
+        assert_eq!(rem.is_zero().unwrap_u8(), 1);
+    }
+
+    #[test]
+    fn test_poly_ct_div_rem() {
+        let p: TestPoly = poly![1, 1, 1, 1]; // x^3 + x^2 + x + 1
+        let q: TestPoly = poly![1, 1]; // x + 1
+        let (div, rem) = TestPoly::ct_div_rem(&p, &q, q.deg());
+        assert_eq!(div, poly![1, 0, 1]); // x^2 + 1
+        assert_eq!(rem.is_zero().unwrap_u8(), 1);
     }
 
     #[test]
     fn test_poly_gcd() {
         let p: TestPoly = poly![1, 0, 0, 1]; // x^3 + 1
         let q: TestPoly = poly![1, 0, 1]; // x^2 + 1
-        let gcd = TestPoly::gcd(&p, &q);
+        let gcd = TestPoly::gcd(&p, &q, p.deg());
         assert_eq!(gcd, poly![1, 1]); // x + 1
     }
 
@@ -437,7 +548,7 @@ mod tests {
     fn test_poly_mod_pow() {
         let p: TestPoly = poly![0, 1]; // x
         let q: TestPoly = poly![1, 1, 1]; // x^2 + x + 1
-        let result = p.mod_pow(3, &q);
+        let result = p.mod_pow(3, &q, q.deg());
         assert_eq!(result, poly![1]); //  1
         assert_eq!(result.deg(), 0);
     }
@@ -445,9 +556,9 @@ mod tests {
     #[test]
     fn test_poly_is_irreducible() {
         let p: TestPoly = poly![1, 1, 0, 1]; // x^3 + x + 1
-        assert!(p.is_irreducible());
+        assert!(p.is_irreducible(3).unwrap_u8() == 1);
         let q: TestPoly = poly![1, 0, 0, 1]; // x^3 + 1 = (x + 1)(x^2 + x + 1)
-        assert!(!q.is_irreducible());
+        assert!(q.is_irreducible(3).unwrap_u8() == 0);
     }
 
     #[test]
@@ -460,7 +571,7 @@ mod tests {
         beta.coeffs[1] = TestGF::new(1);
         beta.coeffs[2] = TestGF::new(1);
 
-        let g = beta.minpoly(&f_y);
+        let g = beta.minpoly(&f_y, f_y.deg());
 
         assert_eq!(g.coeffs[g.deg()].0, 1, "minpoly must be monic");
         assert!(
@@ -469,7 +580,10 @@ mod tests {
             g.deg(),
             T
         );
-        assert!(g.is_irreducible(), "minpoly must be irreducible");
+        assert!(
+            g.is_irreducible(g.deg()).unwrap_u8() == 1,
+            "minpoly must be irreducible"
+        );
 
         // g is USE 1: a real polynomial with GF13 scalar coefficients
         // beta is USE 2: an extension ring element represented as Polynomial<13>
@@ -501,8 +615,9 @@ mod tests {
             beta_pow = rem;
         }
 
-        assert!(
-            result.is_zero(),
+        assert_eq!(
+            result.is_zero().unwrap_u8(),
+            1,
             "g(beta) must be 0 in GF(2^13), got {:?}",
             result
         );
@@ -515,7 +630,7 @@ mod tests {
         // a(x) = x^2 + x + 1
         let a = poly![1, 1, 1];
 
-        let inv_opt = a.inv_mod(&f);
+        let inv_opt = a.inv_mod(&f, f.deg());
         assert!(inv_opt.is_some(), "a(x) must have an inverse modulo f(x)");
 
         let inv = inv_opt.unwrap();

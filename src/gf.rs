@@ -1,4 +1,5 @@
 use std::ops::{Add, Mul};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct GF<const M: u8>(pub u16);
@@ -16,12 +17,8 @@ impl<const M: u8> GF<M> {
         }
     }
 
-    // Fast inverse using fermat's little theorem (a^(2^M-2) mod p)
+    // Fast inverse using fermat's little theorem (a^(2^M-2) mod p) (0^-1 is 0)
     pub fn inv(self) -> Self {
-        if self.0 == 0 {
-            panic!("0^-1 does not exists!");
-        }
-
         let mut res = GF::<M>::new(1);
         let mut base = self;
         let mut exp = (1 << M) - 2;
@@ -41,15 +38,18 @@ impl<const M: u8> GF<M> {
         self.mul(self)
     }
 
-    pub fn pow(self, mut exp: u16) -> Self {
+    pub fn pow(self, exp: u16) -> Self {
         let mut res = GF::<M>::new(1);
         let mut base = self;
-        while exp > 0 {
-            if (exp & 1) == 1 {
-                res = res.mul(base);
-            }
+        let mut current_exp = exp;
+
+        for _ in 0..16 {
+            let bit = (current_exp & 1) as u8;
+            let choice = Choice::from(bit);
+            let prod = res.mul(base);
+            res = GF::conditional_select(&res, &prod, choice);
             base = base.sq();
-            exp >>= 1;
+            current_exp >>= 1;
         }
 
         res
@@ -97,6 +97,18 @@ impl<const M: u8> Mul for GF<M> {
         }
 
         GF((res & m_mask) as u16)
+    }
+}
+
+impl<const M: u8> ConstantTimeEq for GF<M> {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        self.0.ct_eq(&other.0)
+    }
+}
+
+impl<const M: u8> ConditionallySelectable for GF<M> {
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        GF(u16::conditional_select(&a.0, &b.0, choice))
     }
 }
 

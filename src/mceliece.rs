@@ -1,13 +1,14 @@
 use crate::gf::GF;
 use crate::params::{PARAMS, POLY_CAPACITY};
 use crate::poly::Polynomial;
-use crate::subroutines::{decode, encode, matgen, pack_bits, unpack_bits};
+use crate::subroutines::{ct_sort, decode, encode, matgen, pack_bits, unpack_bits};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
 };
+use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 pub type SysGF = GF<{ PARAMS.m }>;
 pub type SysPoly = Polynomial<{ PARAMS.m }, POLY_CAPACITY>;
@@ -52,7 +53,7 @@ pub fn generate_irreducible(bits: &[u16]) -> Option<SysPoly> {
     }
 
     // Step 3: Compute minimal polynomial of Beta in GF(2^M)
-    let g = beta.minpoly(&PARAMS.f_y());
+    let g = beta.minpoly(&PARAMS.f_y(), PARAMS.t);
 
     // Step 4: Return g if deg(g) == t
     if g.deg() == t { Some(g) } else { None }
@@ -67,16 +68,15 @@ pub fn generate_field_ordering(bytes: &[u8]) -> Option<Vec<SysGF>> {
     }
 
     // Step 1: Read sigma_2 (32-bit) values
-    let mut a: Vec<(u32, usize)> = Vec::with_capacity(q);
+    let mut a: Vec<(u32, u32)> = Vec::with_capacity(q);
     for i in 0..q {
         let chunk = &bytes[4 * i..4 * (i + 1)];
         let a_i = u32::from_le_bytes(chunk.try_into().unwrap());
-        a.push((a_i, i));
+        a.push((a_i, i as u32));
     }
 
     // Step 2 & 3: Sort Lexicographically
-    // TODO: Constant time sorting
-    a.sort_unstable_by_key(|&(val, _)| val);
+    ct_sort(&mut a);
 
     // Check for distinction
     for i in 1..q {
@@ -88,7 +88,7 @@ pub fn generate_field_ordering(bytes: &[u8]) -> Option<Vec<SysGF>> {
     // Step 4: Bit reversal from pi(i) indexes, generate alphas
     let mut alphas: Vec<SysGF> = Vec::with_capacity(q);
     for i in 0..q {
-        let pi_i = a[i].1 as u32;
+        let pi_i = a[i].1;
 
         let mut alpha_val = 0u16;
         for j in 0..PARAMS.m {
@@ -248,8 +248,12 @@ pub fn generate_fixed_weight() -> Vec<u8> {
 
         // Step 5: Define e = (e_0, ..., e_{n-1}) in F_2^n as the weight-t vector such that e_a_i = 1 for each i.
         let mut e = vec![0u8; n];
-        for i in a {
-            e[i] = 1;
+
+        for secret_index in a {
+            for i in 0..n {
+                let is_match = (i as u32).ct_eq(&(secret_index as u32));
+                e[i] = u8::conditional_select(&e[i], &1, is_match)
+            }
         }
 
         // Step 6: Return e = (e_0, ..., e_{n-1})
@@ -331,7 +335,10 @@ mod tests {
         // If it returns Some, verify correctness
         if let Some(g) = generate_irreducible(&bits) {
             assert_eq!(g.deg(), PARAMS.t, "degree must be t");
-            assert!(g.is_irreducible(), "must be irreducible");
+            assert!(
+                g.is_irreducible(g.deg()).unwrap_u8() == 1,
+                "must be irreducible"
+            );
         } else {
             println!("Returned None");
         }
