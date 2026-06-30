@@ -1,9 +1,9 @@
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 use crate::mceliece::{Ciphertext, PrivateKey, PublicKey, SessionKey, SysGF, SysPoly};
-use crate::params::{PARAMS, POLY_CAPACITY};
+use crate::params::{K_U64, PARAMS, POLY_CAPACITY};
 
-type MatGenRes = (Vec<Vec<u8>>, Vec<SysGF>);
+type MatGenRes = (Vec<u64>, Vec<SysGF>);
 
 // McEliece Specification (Section 4.2) Matrix Generation for Goppa codes (Systematic form)
 // INPUT: g - generator polynomial, alphas - roots of the generator polynomial
@@ -15,7 +15,9 @@ pub fn matgen(g: &SysPoly, alphas: &[SysGF]) -> Option<MatGenRes> {
     let t = PARAMS.t;
     let mt = m * t;
 
-    let mut h_hat = vec![vec![0u8; n]; mt];
+    let n_u64 = (n + 63) / 64;
+
+    let mut h_hat = vec![0u64; mt * n_u64];
 
     for j in 0..n {
         let a_j = alphas[j];
@@ -32,7 +34,12 @@ pub fn matgen(g: &SysPoly, alphas: &[SysGF]) -> Option<MatGenRes> {
             let h_ij = num * g_inv;
             for k in 0..m {
                 let bit = ((h_ij.0 >> k) & 1) as u8;
-                h_hat[i * m + k][j] = bit;
+                let row = i * m + k;
+
+                let block = j / 64;
+                let bit_index = j % 64;
+
+                h_hat[row * n_u64 + block] |= (bit as u64) << bit_index;
             }
             num = num * a_j;
         }
@@ -43,49 +50,69 @@ pub fn matgen(g: &SysPoly, alphas: &[SysGF]) -> Option<MatGenRes> {
     Some((t_matrix, alphas.to_vec()))
 }
 
-fn reduce_to_systematic_form(
-    matrix: &mut Vec<Vec<u8>>,
-    rows: usize,
-    cols: usize,
-) -> Option<Vec<Vec<u8>>> {
+fn reduce_to_systematic_form(matrix: &mut Vec<u64>, rows: usize, cols: usize) -> Option<Vec<u64>> {
     let k_cols = cols - rows; // n - mt
+    let n_u64 = (cols + 63) / 64;
+    let k_u64 = (k_cols + 63) / 64;
+
+    let mut is_invertible = Choice::from(1u8);
 
     // Make the matrix row-echelon and reduced form (Gauss-Jordan elimination)
     for i in 0..rows {
-        let mut pivot_row = i;
-        let mut found = false;
+        let pivot_block = i / 64;
+        let pivot_bit_idx = i % 64;
 
-        for j in i..rows {
-            if matrix[j][i] == 1 {
-                pivot_row = j;
-                found = true;
-                break;
+        let pivot_bit_i = (matrix[i * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
+        let mut need_swap = Choice::from((1u64 ^ pivot_bit_i) as u8);
+
+        for j in (i + 1)..rows {
+            let pivot_bit_j = (matrix[j * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
+            let bit_j_choice = Choice::from(pivot_bit_j as u8);
+
+            let do_swap = need_swap & bit_j_choice;
+
+            for c in 0..n_u64 {
+                let mut val_i = matrix[i * n_u64 + c];
+                let mut val_j = matrix[j * n_u64 + c];
+                u64::conditional_swap(&mut val_i, &mut val_j, do_swap);
+
+                matrix[i * n_u64 + c] = val_i;
+                matrix[j * n_u64 + c] = val_j;
             }
+
+            need_swap = need_swap & !do_swap;
         }
 
-        if !found {
-            return None;
-        }
-
-        if pivot_row != i {
-            matrix.swap(i, pivot_row);
-        }
-
-        let current_row = matrix[i].clone();
+        let final_pivot = (matrix[i * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
+        is_invertible = is_invertible & Choice::from(final_pivot as u8);
 
         for j in 0..rows {
-            if j != i && matrix[j][i] == 1 {
-                for c in i..cols {
-                    matrix[j][c] ^= current_row[c];
-                }
+            if i == j {
+                continue;
+            }
+
+            let bit_j = (matrix[j * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
+            let do_xor = Choice::from(bit_j as u8);
+
+            for c in 0..n_u64 {
+                let current = matrix[j * n_u64 + c];
+                let xor_val = matrix[i * n_u64 + c];
+                let new_val = current ^ xor_val;
+                matrix[j * n_u64 + c] = u64::conditional_select(&current, &new_val, do_xor);
             }
         }
     }
 
-    let mut t_matrix = vec![vec![0u8; k_cols]; rows];
+    if is_invertible.unwrap_u8() == 0 {
+        return None;
+    }
+
+    let mut t_matrix = vec![0u64; rows * k_u64];
     for i in 0..rows {
-        for j in 0..k_cols {
-            t_matrix[i][j] = matrix[i][rows + j];
+        for c in 0..k_cols {
+            let source_col = rows + c;
+            let bit = (matrix[i * n_u64 + (source_col / 64)] >> (source_col % 64)) & 1u64;
+            t_matrix[i * k_u64 + (c / 64)] |= bit << (c % 64);
         }
     }
 
@@ -98,6 +125,7 @@ fn reduce_to_systematic_form(
 pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
     let mt = (PARAMS.m as usize) * PARAMS.t;
     let k = PARAMS.k;
+    let k_u64 = K_U64;
 
     let mut c_bits = vec![0u8; mt];
 
@@ -106,12 +134,21 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
         c_bits[i] = e[i];
     }
 
-    // 2. C = C xor T_j for each j such that e_{mt+j} = 1 (C = C + T * e_2)
+    let mut e2_blocks = vec![0u64; k_u64];
     for j in 0..k {
-        let mask = 0u8.wrapping_sub(e[mt + j]);
-        for i in 0..mt {
-            c_bits[i] ^= pk.T[i][j] & mask;
+        let bit = e[mt + j] as u64;
+        e2_blocks[j / 64] |= bit << (j % 64);
+    }
+
+    // 2. C = C xor T_j for each j such that e_{mt+j} = 1 (C = C + T * e_2)
+    for i in 0..mt {
+        let mut dot_product = 0u64;
+        for c in 0..k_u64 {
+            dot_product ^= pk.T[i * k_u64 + c] & e2_blocks[c];
         }
+
+        let parity = (dot_product.count_ones() % 2) as u8;
+        c_bits[i] ^= parity;
     }
 
     c_bits
@@ -138,7 +175,7 @@ pub fn unpack_bits(bytes: &[u8], num_bits: usize) -> Vec<u8> {
 
 // McEliece Specification (Section 4.4) Decoding subroutine
 // Decodes C in F_2^mt to a word e of Hamming weight wt(e) = t with C = He if such a word exists; otherwise it returns failure.
-pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> Option<Vec<u8>> {
+pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
     let n = PARAMS.n;
     let t = PARAMS.t;
     let mt = (PARAMS.m as usize) * t;
@@ -152,7 +189,7 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> Option<Vec<u8>> {
     let s_poly = compute_syndrome(&v, &sk);
 
     // Step 2.2: Find sigma(x) error locator polynomial using the Patterson algorithm
-    let sigma_poly = patterson_error_locator(&s_poly, &sk.g)?;
+    let (sigma_poly, patterson_valid) = patterson_error_locator(&s_poly, &sk.g);
 
     // Step 2.3: Find error positions using the error locator polynomial sigma(x) (Chien Search)
     let (e, is_chien_valid) = chien_search(&sigma_poly, &sk.alphas, n);
@@ -176,12 +213,10 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> Option<Vec<u8>> {
     // Make it constant-time
     let is_syndrome_correct: Choice = verify_syndrome(&e, sk, &s_poly);
 
-    let is_valid: Choice = is_weight_correct & is_syndrome_correct & is_chien_valid;
+    let is_valid: Choice =
+        is_weight_correct & is_syndrome_correct & is_chien_valid & patterson_valid;
 
-    if is_valid.unwrap_u8() != 1 {
-        return None;
-    }
-    Some(e)
+    (e, is_valid)
 }
 
 fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
@@ -207,9 +242,15 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
     s_poly
 }
 
-fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
+fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
+    let mut valid = Choice::from(1u8);
+
     // 1. T(x) = S(x)^-1 mod g(x)
-    let t_poly = s_poly.inv_mod(g, PARAMS.t)?;
+    let (t_poly, t_valid) = match s_poly.inv_mod(g, PARAMS.t) {
+        Some(p) => (p, Choice::from(1u8)),
+        None => (SysPoly::zero(), Choice::from(0u8)),
+    };
+    valid = valid & t_valid;
 
     // 2. R(x) = T(x) + x mod g(x)
     let mut r_poly = t_poly;
@@ -227,7 +268,11 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
         }
     }
 
-    let g_odd_inv = g_odd.inv_mod(g, PARAMS.t)?;
+    let (g_odd_inv, g_odd_valid) = match g_odd.inv_mod(g, PARAMS.t) {
+        Some(p) => (p, Choice::from(1u8)),
+        None => (SysPoly::zero(), Choice::from(0u8)),
+    };
+    valid = valid & g_odd_valid;
     let sqrt_x = (&g_even * &g_odd_inv).reduce(g, PARAMS.t);
 
     // Extract odd and even R(x)
@@ -265,7 +310,7 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> Option<SysPoly> {
         sigma.coeffs[2 * i + 1] = newa.coeffs[i].sq();
     }
 
-    Some(sigma)
+    (sigma, valid)
 }
 
 // Returns (c_vec, is_valid) (for constant time concerns)
@@ -448,11 +493,12 @@ pub fn ct_patterson_eea(g: &SysPoly, q: &SysPoly) -> (SysPoly, SysPoly) {
 mod tests {
     use super::*;
     use crate::gf::GF;
+    use crate::params::PK_SIZE;
     use crate::poly::Polynomial;
 
     #[test]
     fn test_reduce_to_systematic_form() {
-        let mut matrix = vec![
+        let raw_matrix = vec![
             vec![0, 1, 1, 1, 0, 0],
             vec![1, 0, 0, 0, 1, 0],
             vec![1, 1, 0, 0, 0, 1],
@@ -461,24 +507,38 @@ mod tests {
         let rows = 3;
         let cols = 6;
 
+        let n_u64 = (cols + 63) / 64;
+
+        let mut matrix = vec![0u64; rows * n_u64];
+        for i in 0..rows {
+            for j in 0..cols {
+                if raw_matrix[i][j] == 1 {
+                    matrix[i * n_u64 + (j / 64)] |= 1u64 << (j % 64);
+                }
+            }
+        }
+
         let result = reduce_to_systematic_form(&mut matrix, rows, cols);
 
         assert!(result.is_some(), "Returned None");
 
         let t_matrix = result.unwrap();
 
+        let k_cols = cols - rows;
+        let k_u64 = (k_cols + 63) / 64;
+
         for i in 0..rows {
             for j in 0..rows {
+                let bit = (matrix[i * n_u64 + (j / 64)] >> (j % 64)) & 1u64;
                 if i == j {
-                    assert_eq!(matrix[i][j], 1);
+                    assert_eq!(bit, 1, "Diagonal (pivot) {} {} must be 1", i, j);
                 } else {
-                    assert_eq!(matrix[i][j], 0);
+                    assert_eq!(bit, 0, "Non-diagonal {} {} must be 0", i, j);
                 }
             }
         }
 
-        assert_eq!(t_matrix.len(), 3,);
-        assert_eq!(t_matrix[0].len(), 3);
+        assert_eq!(t_matrix.len(), rows * k_u64);
     }
 
     #[test]
@@ -486,6 +546,7 @@ mod tests {
         let t = PARAMS.t;
         let m = PARAMS.m as usize;
         let n = PARAMS.n;
+        let pk_size = PK_SIZE;
 
         let g = Polynomial::from_slice(&[GF::new(1); PARAMS.t + 1]);
 
@@ -501,7 +562,7 @@ mod tests {
             let k = n - mt;
 
             assert_eq!(t_matrix.len(), mt);
-            assert_eq!(t_matrix[0].len(), k);
+            assert_eq!(t_matrix.len(), pk_size);
             assert_eq!(out_alphas.len(), n);
         }
     }
@@ -526,11 +587,13 @@ mod tests {
         let mt = (PARAMS.m as usize) * PARAMS.t;
         let k = PARAMS.k;
         let n = PARAMS.n;
+        let k_u64 = K_U64;
 
-        let mut t_matrix = vec![vec![0u8; k]; mt];
+        let mut t_matrix = vec![0u64; mt * k_u64];
         for i in 0..mt {
             for j in 0..k {
-                t_matrix[i][j] = ((i + j) % 2) as u8;
+                let bit = ((i + j) % 2) as u64;
+                t_matrix[i * k_u64 + (j / 64)] = bit << (j % 64);
             }
         }
         let pk = PublicKey {
@@ -552,9 +615,11 @@ mod tests {
         let mut e2 = vec![0u8; n];
         e2[mt] = 1;
         let c2 = encode(&e2, &pk);
+
         for i in 0..mt {
             assert_eq!(
-                c2[i], t_matrix[i][0],
+                c2[i],
+                (pk.T[i * k_u64] & 1) as u8,
                 "C must match T matrix for e_2 = [0, 1, 0, 0]"
             );
         }
@@ -580,7 +645,8 @@ mod tests {
         let ciphertext = pack_bits(&c_bits);
 
         // Attempt to decode
-        let decoded = decode(&ciphertext, &sk).expect("decode failed");
+        let (decoded, is_valid) = decode(&ciphertext, &sk);
+        assert_eq!(is_valid.unwrap_u8(), 1, "Decode should succeed");
 
         assert_eq!(decoded, e, "Decoded error vector must match original");
     }

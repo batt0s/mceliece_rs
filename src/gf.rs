@@ -19,18 +19,7 @@ impl<const M: u8> GF<M> {
 
     // Fast inverse using fermat's little theorem (a^(2^M-2) mod p) (0^-1 is 0)
     pub fn inv(self) -> Self {
-        let mut res = GF::<M>::new(1);
-        let mut base = self;
-        let mut exp = (1 << M) - 2;
-        while exp > 0 {
-            if (exp & 1) == 1 {
-                res = res * base;
-            }
-            base = base * base;
-            exp >>= 1;
-        }
-
-        res
+        self.pow((1 << M) - 2)
     }
 
     // TODO: Use bit interleaving for faster/optimized squaring

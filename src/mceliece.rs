@@ -18,7 +18,7 @@ pub type SessionKey = [u8; 32];
 
 #[derive(Serialize, Deserialize)]
 pub struct PublicKey {
-    pub T: Vec<Vec<u8>>,
+    pub T: Vec<u64>,
 }
 
 pub struct PrivateKey {
@@ -297,16 +297,16 @@ pub fn decapsulate(c: &Ciphertext, sk: &PrivateKey) -> SessionKey {
     let s = &sk.s;
 
     // Step 3: e <- DECODE(C, Gamma')
-    let e_opt = decode(c, &sk);
+    let (decoded_e, is_valid) = decode(c, &sk);
+
+    let mut e = [0u8; PARAMS.n];
 
     // If decode fails (e_opt is None), e <- s and b <- 0
-    let e = match e_opt {
-        Some(e) => e,
-        None => {
-            b = 0;
-            unpack_bits(s, PARAMS.n)
-        }
-    };
+    let s_bits = unpack_bits(s, PARAMS.n);
+    for i in 0..PARAMS.n {
+        e[i] = u8::conditional_select(&s_bits[i], &decoded_e[i], is_valid);
+    }
+    b = is_valid.unwrap_u8();
 
     // Step 4: Compute K = H(b, e, C)
     let e_bytes = pack_bits(&e);
@@ -325,6 +325,8 @@ pub fn decapsulate(c: &Ciphertext, sk: &PrivateKey) -> SessionKey {
 
 #[cfg(test)]
 mod tests {
+    use crate::params::PK_SIZE;
+
     use super::*;
 
     #[test]
@@ -375,11 +377,13 @@ mod tests {
         let n = PARAMS.n;
         let t = PARAMS.t;
         let q = PARAMS.q;
-        let k = PARAMS.k; // n - mt
-        let mt = m * t;
 
-        assert_eq!(pk.T.len(), mt, "T matrix should have {} rows", mt);
-        assert_eq!(pk.T[0].len(), k, "T matrix should have {} columns", k);
+        assert_eq!(
+            pk.T.len(),
+            PK_SIZE,
+            "Size of T matrix should be {}",
+            PK_SIZE
+        );
 
         assert_eq!(sk.delta.len(), 32, "Delta (seed) should have 32 bytes");
         assert_eq!(
