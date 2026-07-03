@@ -1,5 +1,5 @@
-use mceliece::key_manager;
-use mceliece::mceliece::keygen;
+use mceliece_rs::key_manager;
+use mceliece_rs::mceliece::keygen;
 use std::path::Path;
 
 fn main() {

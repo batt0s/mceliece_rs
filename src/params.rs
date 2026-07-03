@@ -56,7 +56,7 @@ static F_Y_COEFFS_460896: [u16; 97] = {
     arr
 };
 
-pub const POLY_CAPACITY: usize = 256;
+pub const POLY_CAPACITY: usize = 128;
 pub const MT: usize = (PARAMS.m as usize) * PARAMS.t;
 pub const K_U64: usize = (PARAMS.k + 63) / 64;
 pub const PK_SIZE: usize = MT * K_U64;
