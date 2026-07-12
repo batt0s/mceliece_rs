@@ -1,3 +1,4 @@
 /target
 mceliece-spec-20221023.pdf
 .zed/
+.venv/

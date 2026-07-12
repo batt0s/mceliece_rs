@@ -1,0 +1,13 @@
+[package]
+name = "python_bindings"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "mceliece_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+mceliece_rs = { path = "../core" }
+pyo3 = { version = "0.29.0", features = ["extension-module"] }
+bincode = "1.3"
