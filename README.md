@@ -8,8 +8,8 @@ This repository focuses on eliminating timing side-channel vulnerabilities (like
  
 This is a Cargo workspace with two crates:
  
-* [`core/`](./core) — the McEliece implementation itself (package name `mceliece_rs`). This is what you want if you're using the library from Rust.
-* [`python_bindings/`](./python_bindings) — PyO3 bindings exposing `core` to Python as the `mceliece_rs` module. See that directory for build/usage instructions.
+* [`core/`](./core) - the McEliece implementation itself (package name `mceliece_rs`). This is what you want if you're using the library from Rust.
+* [`python_bindings/`](./python_bindings) - PyO3 bindings exposing `core` to Python as the `mceliece_rs` module. See that directory for build/usage instructions.
 
 ## Features
 * **Constant-Time Execution:** End-to-end constant-time decapsulation. Conditional branching and early returns have been replaced with bitwise masking (`subtle::conditional_select`) and dummy operations to prevent timing leaks.
@@ -56,11 +56,11 @@ maturin develop --release
 ```
  
 ```python
-import mceliece_rs
+import mceliece_py
  
-pk, sk = mceliece_rs.keygen()
-ciphertext, session_key = mceliece_rs.encapsulate(pk)
-recovered = mceliece_rs.decapsulate(ciphertext, sk)
+pk, sk = mceliece_py.keygen()
+ciphertext, session_key = mceliece_py.encapsulate(pk)
+recovered = mceliece_py.decapsulate(ciphertext, sk)
 assert session_key == recovered
 ```
 
