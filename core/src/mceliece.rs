@@ -2,7 +2,7 @@ use crate::gf::GF;
 use crate::params::{PARAMS, POLY_CAPACITY};
 use crate::poly::Polynomial;
 use crate::subroutines::{ct_sort, decode, encode, matgen, pack_bits, unpack_bits};
-use rand::Rng;
+use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha3::{
     Shake256,
@@ -21,12 +21,161 @@ pub struct PublicKey {
     pub T: Vec<u64>,
 }
 
+impl PublicKey {
+    /// Classic McEliece spec (Section 6.2) canonical byte representation.
+    /// Each row of T is packed to ceil(k/8) bytes, LSB-first.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mt = (PARAMS.m as usize) * PARAMS.t;
+        let k = PARAMS.k;
+        let k_u64 = crate::params::K_U64;
+        let row_bytes = (k + 7) / 8;
+
+        let mut out = vec![0u8; mt * row_bytes];
+        for row in 0..mt {
+            for bit_idx in 0..k {
+                let word = self.T[row * k_u64 + bit_idx / 64];
+                let bit = (word >> (bit_idx % 64)) & 1;
+                out[row * row_bytes + bit_idx / 8] |= (bit as u8) << (bit_idx % 8);
+            }
+        }
+        out
+    }
+}
+
 pub struct PrivateKey {
     pub delta: [u8; 32],
     pub c: [u8; 8],
     pub g: SysPoly,
     pub alphas: Vec<SysGF>,
     pub s: Vec<u8>,
+}
+
+impl PrivateKey {
+    /// Partial Classic McEliece spec (Section 6.2) secret key encoding.
+    /// NOTE: does not yet include controlbits(π) — the field ordering is
+    /// encoded here as raw alphas rather than the spec's Beneš-network
+    /// control-bit representation, so this will NOT match official KAT
+    /// vectors until that's implemented.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let t = PARAMS.t;
+        let m = PARAMS.m;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.delta);
+        out.extend_from_slice(&self.c);
+
+        for i in 0..t {
+            out.extend_from_slice(&self.g.coeffs[i].0.to_le_bytes());
+        }
+
+        // Field ordering, encoded per Benes-network control bits
+        let pi: Vec<u32> = self.alphas.iter().map(|a| reverse_bits(a.0, m)).collect();
+        let cb_bits = controlbits(&pi);
+        out.extend_from_slice(&crate::subroutines::pack_bits(&cb_bits));
+
+        out.extend_from_slice(&self.s);
+        out
+    }
+}
+
+/// Reverses the order of the low `m` bits of `value`. Self-inverse.
+fn reverse_bits(value: u16, m: u8) -> u32 {
+    let mut result = 0u32;
+    for j in 0..m {
+        let bit = (value >> j) & 1;
+        result |= (bit as u32) << (m - 1 - j);
+    }
+    result
+}
+
+/// composeinv(c, pi) = c . pi^-1, per the spec's Python `composeinv`.
+fn composeinv(c: &[u32], pi: &[u32]) -> Vec<u32> {
+    let mut pairs: Vec<(u32, u32)> = pi.iter().copied().zip(c.iter().copied()).collect();
+    pairs.sort_by_key(|&(x, _)| x);
+    pairs.into_iter().map(|(_, y)| y).collect()
+}
+
+/// Classic McEliece spec `controlbits` algorithm. (https://classic.mceliece.org/mceliece-sage-20221023/controlbits.py.html)
+/// pi must be a permutation of {0, ..., n-1} with n = 2^m.
+fn controlbits(pi: &[u32]) -> Vec<u8> {
+    let n = pi.len();
+    let mut m = 1u32;
+    while (1usize << m) < n {
+        m += 1;
+    }
+    assert_eq!(
+        1usize << m,
+        n,
+        "controlbits input length must be a power of two"
+    );
+
+    if m == 1 {
+        return vec![pi[0] as u8];
+    }
+
+    let idx: Vec<u32> = (0..n as u32).collect();
+
+    let p0: Vec<u32> = idx.iter().map(|&x| pi[(x ^ 1) as usize]).collect();
+    let q0: Vec<u32> = idx.iter().map(|&x| pi[x as usize] ^ 1).collect();
+
+    let piinv = composeinv(&idx, pi);
+
+    // p, q = composeinv(p,q), composeinv(q,p)   [python line 1]
+    let p1 = composeinv(&p0, &q0);
+    let q1 = composeinv(&q0, &p0);
+
+    let mut c: Vec<u32> = idx.iter().map(|&x| x.min(p1[x as usize])).collect();
+
+    // p, q = composeinv(p,q), composeinv(q,p)   [python line 2, reusing p1,q1]
+    let mut p = composeinv(&p1, &q1);
+    let mut q = composeinv(&q1, &p1);
+
+    for _ in 1..(m - 1) {
+        let cp = composeinv(&c, &q);
+        let new_p = composeinv(&p, &q);
+        let new_q = composeinv(&q, &p);
+        p = new_p;
+        q = new_q;
+        c = idx
+            .iter()
+            .map(|&x| c[x as usize].min(cp[x as usize]))
+            .collect();
+    }
+
+    let half = n / 2;
+    let f: Vec<u8> = (0..half).map(|j| (c[2 * j] % 2) as u8).collect();
+    let big_f: Vec<u32> = idx
+        .iter()
+        .map(|&x| x ^ (f[(x as usize) / 2] as u32))
+        .collect();
+    let f_pi = composeinv(&big_f, &piinv);
+
+    let l: Vec<u8> = (0..half).map(|k| (f_pi[2 * k] % 2) as u8).collect();
+    let big_l: Vec<u32> = idx
+        .iter()
+        .map(|&y| y ^ (l[(y as usize) / 2] as u32))
+        .collect();
+
+    let m_arr = composeinv(&f_pi, &big_l);
+
+    let sub_m: [Vec<u32>; 2] = [
+        (0..half).map(|j| m_arr[2 * j] / 2).collect(),
+        (0..half).map(|j| m_arr[2 * j + 1] / 2).collect(),
+    ];
+
+    let subz0 = controlbits(&sub_m[0]);
+    let subz1 = controlbits(&sub_m[1]);
+
+    let mut z = Vec::with_capacity(subz0.len() + subz1.len());
+    for i in 0..subz0.len() {
+        z.push(subz0[i]);
+        z.push(subz1[i]);
+    }
+
+    let mut result = f;
+    result.extend(z);
+    result.extend(l);
+    result
 }
 
 // Classic McEliece Specifications (Section 5.1) Irreducible-polynomial Generation
@@ -193,26 +342,28 @@ pub fn seeded_keygen(mut seed: [u8; 32]) -> (PublicKey, PrivateKey) {
 // if n = q; as 2t if q/2 <= n < q; as 4t if q/4 <= n < q/2; etc.
 // All of the selected parameter sets have q/2 <= n < q, so tau in {t, 2t}.
 pub fn generate_fixed_weight() -> Vec<u8> {
+    generate_fixed_weight_with_rng(&mut rand::thread_rng())
+}
+
+pub fn generate_fixed_weight_with_rng<R: RngCore>(rng: &mut R) -> Vec<u8> {
     let n = PARAMS.n;
     let t = PARAMS.t;
     let q = PARAMS.q;
     let m = PARAMS.m as usize;
 
-    // Determine tau based on n and t
     let mut tau = t;
     let mut bound = q;
     while bound > n {
         tau *= 2;
         bound /= 2;
     }
-
     let m_mask = (1u16 << m) - 1;
 
     loop {
         // Step 1: Generate sigma_1*tau uniform random bits b_0, b_1, ..., b_{sigma_1*tau-1}
         // Note: sigma_1 = 16 bit
         let mut buf = vec![0u8; 2 * tau];
-        rand::thread_rng().fill(&mut buf[..]);
+        rng.fill_bytes(&mut buf);
 
         let mut a = Vec::with_capacity(t);
 
@@ -264,8 +415,12 @@ pub fn generate_fixed_weight() -> Vec<u8> {
 // McEliece Specification (Section 5.5) Encapsulation
 // Takes a public key T. It outputs a ciphertext C and a session key K.
 pub fn encapsulate(pk: &PublicKey) -> (Ciphertext, SessionKey) {
+    encapsulate_with_rng(pk, &mut rand::thread_rng())
+}
+
+pub fn encapsulate_with_rng<R: RngCore>(pk: &PublicKey, rng: &mut R) -> (Ciphertext, SessionKey) {
     // Step 1: Generate a random vector e with weight t.
-    let e = generate_fixed_weight();
+    let e = generate_fixed_weight_with_rng(rng);
 
     // Step 2: Compute the ciphertext C = ENCODE(e, T)
     let c_bits = encode(&e, pk);
