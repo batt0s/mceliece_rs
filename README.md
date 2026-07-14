@@ -21,13 +21,13 @@ This is a Cargo workspace with two crates:
 ## Security Proof: Statistical Timing Analysis
 To mathematically prove the absence of timing leaks at the hardware level, this implementation has been tested using the **dudect** (Dude, is my code constant time?) methodology.
 
-A Welch's t-test was executed on a VPS, processing 1000 decapsulation iterations across valid and tampered ciphertexts. 
+A Welch's t-test was executed on a VPS, processing 8000 decapsulation iterations across valid and tampered ciphertexts. 
 
 **Results:**
-* `n`: +0.001M
-* `max t`: -2.86153
-* `max tau`: -0.09104
-* `(5/tau)^2`: 3016
+* `n`: +0.008M
+* `max t`: +0.85440
+* `max tau`: +0.00935
+* `(5/tau)^2`: 285959
 
 With a `max t` value well within the safe interval of `[-4.5, +4.5]`, the hardware-level constant-time execution is statistically verified.
 
