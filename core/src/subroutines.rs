@@ -186,7 +186,7 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
 
     // Step 2: Find unique c in F_2^n such that Hc = 0 and c has Hamming distance <= t from v.
     // Step 2.1: Compute Syndrome S(x) = sum_{j=0}^{n-1} v_j / (x - alpha_j) mod g(x)
-    let s_poly = compute_syndrome(&v, &sk);
+    let (s_poly, s_valid) = compute_syndrome(&v, &sk);
 
     // Step 2.2: Find sigma(x) error locator polynomial using the Patterson algorithm
     let (sigma_poly, patterson_valid) = patterson_error_locator(&s_poly, &sk.g);
@@ -214,13 +214,14 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
     let is_syndrome_correct: Choice = verify_syndrome(&e, sk, &s_poly);
 
     let is_valid: Choice =
-        is_weight_correct & is_syndrome_correct & is_chien_valid & patterson_valid;
+        is_weight_correct & is_syndrome_correct & is_chien_valid & patterson_valid & s_valid;
 
     (e, is_valid)
 }
 
-fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
+fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> (SysPoly, Choice) {
     let mut s_poly = SysPoly::zero();
+    let mut all_valid = Choice::from(1u8);
 
     for j in 0..PARAMS.n {
         let mut denom = SysPoly::zero();
@@ -228,6 +229,7 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
         denom.coeffs[1] = SysGF::new(1);
 
         let (inv, is_invertible) = denom.inv_mod(&sk.g, PARAMS.t);
+        all_valid = all_valid & is_invertible;
 
         let mask = Choice::from(v[j]);
 
@@ -239,7 +241,7 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
             );
         }
     }
-    s_poly
+    (s_poly, all_valid)
 }
 
 fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
@@ -310,32 +312,22 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
 // Returns (c_vec, is_valid) (for constant time concerns)
 fn chien_search(sigma: &SysPoly, alphas: &[SysGF], n: usize) -> (Vec<u8>, Choice) {
     let mut c_vec = vec![0u8; n];
-    let mut root_count = 0;
+    let mut root_count: u16 = 0;
     for j in 0..n {
         let eval_res = sigma.eval(alphas[j]).0;
         let is_root: Choice = eval_res.ct_eq(&0);
         c_vec[j] = u8::conditional_select(&0, &1, is_root);
-        root_count += is_root.unwrap_u8() as usize;
+        root_count = u16::conditional_select(&root_count, &root_count.wrapping_add(1), is_root)
     }
-    let is_valid = root_count.ct_eq(&PARAMS.t);
+    let is_valid = root_count.ct_eq(&(PARAMS.t as u16));
     (c_vec, is_valid)
 }
 
 fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> Choice {
-    let e_syndrome = compute_syndrome(e, sk);
+    let (e_syndrome, _e_valid) = compute_syndrome(e, sk);
     let mut is_equal = Choice::from(1u8);
     for i in 0..PARAMS.t {
-        let c1 = if i < e_syndrome.coeffs.len() {
-            e_syndrome.coeffs[i].0
-        } else {
-            0
-        };
-        let c2 = if i < s_poly.coeffs.len() {
-            s_poly.coeffs[i].0
-        } else {
-            0
-        };
-        is_equal = is_equal & c1.ct_eq(&c2);
+        is_equal = is_equal & e_syndrome.coeffs[i].0.ct_eq(&s_poly.coeffs[i].0);
     }
     is_equal
 }
