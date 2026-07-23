@@ -223,25 +223,27 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     // Handbook of Applied Cryptography, Algorithm 2.227, Repeated square-and-multiply algorithm for exponentiation in F_q^m
     // INPUT: a polynomial g in F_q^m (&self), and an integer 0 <= k < p^m - 1 (where F_q^m = Z_p[x]/f)
     // OUTPUT: the result of g^k mod f
-    pub fn mod_pow(&self, mut k: usize, f: &Self, f_deg: usize) -> Self {
+    pub fn mod_pow(&self, k: usize, f: &Self, f_deg: usize) -> Self {
         let mut s = Self::zero();
         s.coeffs[0] = GF(1);
-        if k == 0 {
-            return s;
-        }
 
         let mut g_x = self.reduce(f, f_deg);
 
-        while k > 0 {
-            if k & 1 == 1 {
-                let prod = &s * &g_x;
-                s = prod.reduce(f, f_deg);
+        let mut current_k = k;
+
+        for _ in 0..(usize::BITS as usize) {
+            let bit = Choice::from((current_k & 1) as u8);
+
+            let prod = &s * &g_x;
+            let reduced = prod.reduce(f, f_deg);
+            for i in 0..N {
+                s.coeffs[i] = GF::conditional_select(&s.coeffs[i], &reduced.coeffs[i], bit);
             }
 
             let sq = &g_x * &g_x;
             g_x = sq.reduce(f, f_deg);
 
-            k >>= 1;
+            current_k >>= 1;
         }
 
         s
