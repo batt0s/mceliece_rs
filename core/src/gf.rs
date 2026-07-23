@@ -6,7 +6,7 @@ pub struct GF<const M: u8>(pub u16);
 
 impl<const M: u8> GF<M> {
     pub fn new(value: u16) -> Self {
-        GF(value % (1 << M))
+        GF(value & ((1u16 << M) - 1))
     }
 
     pub fn get_irreducible_poly() -> u32 {
