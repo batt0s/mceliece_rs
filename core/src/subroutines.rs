@@ -227,7 +227,7 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> SysPoly {
         denom.coeffs[0] = sk.alphas[j];
         denom.coeffs[1] = SysGF::new(1);
 
-        let inv = denom.inv_mod(&sk.g, PARAMS.t).unwrap();
+        let (inv, is_invertible) = denom.inv_mod(&sk.g, PARAMS.t);
 
         let mask = Choice::from(v[j]);
 
@@ -246,10 +246,7 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
     let mut valid = Choice::from(1u8);
 
     // 1. T(x) = S(x)^-1 mod g(x)
-    let (t_poly, t_valid) = match s_poly.inv_mod(g, PARAMS.t) {
-        Some(p) => (p, Choice::from(1u8)),
-        None => (SysPoly::zero(), Choice::from(0u8)),
-    };
+    let (t_poly, t_valid) = s_poly.inv_mod(g, PARAMS.t);
     valid = valid & t_valid;
 
     // 2. R(x) = T(x) + x mod g(x)
@@ -268,10 +265,7 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
         }
     }
 
-    let (g_odd_inv, g_odd_valid) = match g_odd.inv_mod(g, PARAMS.t) {
-        Some(p) => (p, Choice::from(1u8)),
-        None => (SysPoly::zero(), Choice::from(0u8)),
-    };
+    let (g_odd_inv, g_odd_valid) = g_odd.inv_mod(g, PARAMS.t);
     valid = valid & g_odd_valid;
     let sqrt_x = (&g_even * &g_odd_inv).reduce(g, PARAMS.t);
 

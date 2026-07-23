@@ -401,7 +401,8 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     }
 
     // Bernstein-Yang SafeGCD algorithm for polynomial inversion modulo f (A^-1 mod M)
-    pub fn inv_mod(&self, m: &Self, max_deg: usize) -> Option<Self> {
+    // Returns (inverse, is_invertible) where is_invertible is 1 if the inverse exists, 0 otherwise
+    pub fn inv_mod(&self, m: &Self, max_deg: usize) -> (Self, Choice) {
         let mut f = *m;
         let mut g = *self;
 
@@ -456,11 +457,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
             inverse.coeffs[i] = v.coeffs[i] * safe_f0_inv;
         }
 
-        if is_invertible.unwrap_u8() == 1 {
-            Some(inverse)
-        } else {
-            None
-        }
+        (inverse, is_invertible)
     }
 }
 
@@ -630,10 +627,11 @@ mod tests {
         // a(x) = x^2 + x + 1
         let a = poly![1, 1, 1];
 
-        let inv_opt = a.inv_mod(&f, f.deg());
-        assert!(inv_opt.is_some(), "a(x) must have an inverse modulo f(x)");
-
-        let inv = inv_opt.unwrap();
+        let (inv, inv_valid) = a.inv_mod(&f, f.deg());
+        assert!(
+            inv_valid.unwrap_u8() == 1,
+            "a(x) must have an inverse modulo f(x)"
+        );
 
         // a(x) * a^-1(x)
         let prod = &a * &inv;
