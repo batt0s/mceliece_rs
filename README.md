@@ -1,5 +1,16 @@
 # Constant-Time Classic McEliece in Rust
 
+[![Build Status](https://github.com/batt0s/mceliece_rs/actions/workflows/rust.yml/badge.svg)](https://github.com/batt0s/mceliece_rs/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **⚠️ WARNING / SECURITY NOTICE ⚠️**
+> 
+> This is an experimental, **unaudited** implementation of the Classic McEliece post-quantum cryptosystem written in Rust. It is intended for educational, experimental, and research purposes only. 
+>
+> **DO NOT USE THIS IN PRODUCTION ENVIRONMENTS** or to protect sensitive data. Cryptographic implementations require extensive review by security professionals. While efforts have been made to ensure constant-time execution for operations like decapsulation, these properties have not been formally verified.
+
+---
+
 Yet another implementation of the Classic McEliece Post-Quantum Cryptography (PQC) algorithm, written in Rust. 
 
 This repository focuses on eliminating timing side-channel vulnerabilities (like Chosen-Ciphertext Attacks) while strictly adhering to the NIST PQC specifications and Known Answer Tests (KAT).
