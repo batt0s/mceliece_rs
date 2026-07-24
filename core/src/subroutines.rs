@@ -422,43 +422,25 @@ pub fn ct_patterson_eea(g: &SysPoly, q: &SysPoly) -> (SysPoly, SysPoly) {
         let lead_r0 = r0.lead();
         let lead_r1 = r1.lead();
         let safe_lead_r1 = SysGF::conditional_select(&lead_r1, &SysGF::new(1), is_r1_zero);
-        let mutliplier = lead_r0 * safe_lead_r1.inv();
+        let multiplier = lead_r0 * safe_lead_r1.inv();
 
         let mut shifted_r1 = r1;
         let mut shifted_a1 = a1;
 
         for i in 0..POLY_CAPACITY {
-            shifted_r1.coeffs[i] = shifted_r1.coeffs[i] * mutliplier;
-            shifted_a1.coeffs[i] = shifted_a1.coeffs[i] * mutliplier;
+            shifted_r1.coeffs[i] = shifted_r1.coeffs[i] * multiplier;
+            shifted_a1.coeffs[i] = shifted_a1.coeffs[i] * multiplier;
         }
 
         // 4. Shift the polynomial left
-        for step in 0..PARAMS.t {
-            let should_shift = Choice::from((step < diff) as u8);
-
-            let mut next_r1 = SysPoly::zero();
-            let mut next_a1 = SysPoly::zero();
-
-            next_r1.coeffs[0] =
-                SysGF::conditional_select(&shifted_r1.coeffs[0], &SysGF::new(0), should_shift);
-            next_a1.coeffs[0] =
-                SysGF::conditional_select(&shifted_a1.coeffs[0], &SysGF::new(0), should_shift);
-
-            for i in 1..POLY_CAPACITY {
-                next_r1.coeffs[i] = SysGF::conditional_select(
-                    &shifted_r1.coeffs[i],
-                    &shifted_r1.coeffs[i - 1],
-                    should_shift,
-                );
-                next_a1.coeffs[i] = SysGF::conditional_select(
-                    &shifted_a1.coeffs[i],
-                    &shifted_a1.coeffs[i - 1],
-                    should_shift,
-                );
-            }
-
-            shifted_r1 = next_r1;
-            shifted_a1 = next_a1;
+        for dst in 0..(PARAMS.t + 1) {
+            let in_bounds = Choice::from((dst >= diff) as u8);
+            let raw_src = dst.wrapping_sub(diff);
+            let src = if raw_src < POLY_CAPACITY { raw_src } else { 0 };
+            let r1_val = r1.coeffs[src] * multiplier;
+            let a1_val = a1.coeffs[src] * multiplier;
+            shifted_r1.coeffs[dst] = SysGF::conditional_select(&SysGF::new(0), &r1_val, in_bounds);
+            shifted_a1.coeffs[dst] = SysGF::conditional_select(&SysGF::new(0), &a1_val, in_bounds);
         }
 
         // 5. r0 = r0 - shifted_r1

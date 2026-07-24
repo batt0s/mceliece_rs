@@ -8,7 +8,7 @@ use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
 };
-use subtle::{ConditionallySelectable, ConstantTimeEq};
+use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
 
 pub type SysGF = GF<{ PARAMS.m }>;
 pub type SysPoly = Polynomial<{ PARAMS.m }, POLY_CAPACITY>;
@@ -16,7 +16,7 @@ pub type SysPoly = Polynomial<{ PARAMS.m }, POLY_CAPACITY>;
 pub type Ciphertext = Vec<u8>;
 pub type SessionKey = [u8; 32];
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicKey {
     pub T: Vec<u64>,
 }
@@ -52,10 +52,6 @@ pub struct PrivateKey {
 
 impl PrivateKey {
     /// Partial Classic McEliece spec (Section 6.2) secret key encoding.
-    /// NOTE: does not yet include controlbits(π) — the field ordering is
-    /// encoded here as raw alphas rather than the spec's Beneš-network
-    /// control-bit representation, so this will NOT match official KAT
-    /// vectors until that's implemented.
     pub fn to_bytes(&self) -> Vec<u8> {
         let t = PARAMS.t;
         let m = PARAMS.m;

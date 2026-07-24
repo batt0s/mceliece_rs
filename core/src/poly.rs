@@ -170,6 +170,17 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     // The divisor must be monic and the divisor must be non-zero
     // d is the degree of the divisor
     pub fn ct_div_rem(dividend: &Self, divisor: &Self, d: usize) -> (Self, Self) {
+        debug_assert!(
+            divisor.deg() == d,
+            "ct_div_rem: d ({}) must equal divisor degree ({})",
+            d,
+            divisor.deg()
+        );
+        debug_assert!(
+            !divisor.is_zero().unwrap_u8() == 1,
+            "ct_div_rem: divisor must be non-zero"
+        );
+
         let mut rem = *dividend;
         let mut q = Self::zero();
 
@@ -223,6 +234,10 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     // Handbook of Applied Cryptography, Algorithm 2.227, Repeated square-and-multiply algorithm for exponentiation in F_q^m
     // INPUT: a polynomial g in F_q^m (&self), and an integer 0 <= k < p^m - 1 (where F_q^m = Z_p[x]/f)
     // OUTPUT: the result of g^k mod f
+    // The iteration count is fixed at the bit-width of usize (typically 64),
+    // making this constant-time regardless of the exponent's Hamming weight.
+    // The result is correct only when k < 2^64 — which holds for all internal
+    // callers (k = 1 << M with M ∈ {12, 13}).
     pub fn mod_pow(&self, k: usize, f: &Self, f_deg: usize) -> Self {
         let mut s = Self::zero();
         s.coeffs[0] = GF(1);

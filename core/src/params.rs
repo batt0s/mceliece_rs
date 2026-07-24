@@ -25,19 +25,6 @@ pub const PARAMS: McElieceParams = McElieceParams {
     l: 256,
 };
 
-#[cfg(feature = "mceliece348864")]
-static F_Y_COEFFS_348864: [u16; 65] = {
-    let mut arr = [0u16; 65];
-    arr[0] = 2; // z (generator of GF(2^12))
-    arr[1] = 1; // y
-    arr[3] = 1; // y^3
-    arr[64] = 1; // y^64
-    arr
-};
-
-#[cfg(feature = "mceliece348864")]
-pub const POLY_CAPACITY: usize = 128;
-
 #[cfg(feature = "mceliece460896")]
 pub const PARAMS: McElieceParams = McElieceParams {
     m: 13,
@@ -60,6 +47,19 @@ static F_Y_COEFFS_460896: [u16; 97] = {
     arr[96] = 1;
     arr
 };
+
+#[cfg(feature = "mceliece348864")]
+static F_Y_COEFFS_348864: [u16; 65] = {
+    let mut arr = [0u16; 65];
+    arr[0] = 2; // z (generator of GF(2^12))
+    arr[1] = 1; // y
+    arr[3] = 1; // y^3
+    arr[64] = 1; // y^64
+    arr
+};
+
+#[cfg(feature = "mceliece348864")]
+pub const POLY_CAPACITY: usize = 128;
 
 #[cfg(feature = "mceliece460896")]
 pub const POLY_CAPACITY: usize = 256;
