@@ -9,7 +9,9 @@ description = "A Rust implementation of the Classic McEliece cryptosystem"
 default = ["mceliece348864"]
 mceliece348864 = []
 mceliece460896 = []
+mceliece6688128 = []
 mceliece6960119 = []
+mceliece8192128 = []
 
 [dependencies]
 rand = "0.8"

@@ -37,15 +37,40 @@ pub const PARAMS: McElieceParams = McElieceParams {
     l: 256,
 };
 
-#[cfg(feature = "mceliece460896")]
-static F_Y_COEFFS_460896: [u16; 97] = {
-    let mut arr = [0u16; 97];
-    arr[0] = 1;
-    arr[6] = 1;
-    arr[9] = 1;
-    arr[10] = 1;
-    arr[96] = 1;
-    arr
+#[cfg(feature = "mceliece6688128")]
+pub const PARAMS: McElieceParams = McElieceParams {
+    m: 13,
+    n: 6688,
+    t: 128,
+    q: 1usize << 13,
+    k: 6688 - (13 * 128),
+    f_z: 0x201B, // z^13 + z^4 + z^3 + z + 1
+    f_y_coeffs: &F_Y_COEFFS_6688128,
+    l: 256,
+};
+
+#[cfg(feature = "mceliece6960119")]
+pub const PARAMS: McElieceParams = McElieceParams {
+    m: 13,
+    n: 6960,
+    t: 119,
+    q: 1usize << 13,
+    k: 6960 - (13 * 119),
+    f_z: 0x201B, // z^13 + z^4 + z^3 + z + 1
+    f_y_coeffs: &F_Y_COEFFS_6960119,
+    l: 256,
+};
+
+#[cfg(feature = "mceliece8192128")]
+pub const PARAMS: McElieceParams = McElieceParams {
+    m: 13,
+    n: 8192,
+    t: 128,
+    q: 1usize << 13,
+    k: 8192 - (13 * 128),
+    f_z: 0x201B, // z^13 + z^4 + z^3 + z + 1
+    f_y_coeffs: &F_Y_COEFFS_8192128,
+    l: 256,
 };
 
 #[cfg(feature = "mceliece348864")]
@@ -58,10 +83,61 @@ static F_Y_COEFFS_348864: [u16; 65] = {
     arr
 };
 
+#[cfg(feature = "mceliece460896")]
+static F_Y_COEFFS_460896: [u16; 97] = {
+    let mut arr = [0u16; 97];
+    arr[0] = 1;
+    arr[6] = 1;
+    arr[9] = 1;
+    arr[10] = 1;
+    arr[96] = 1;
+    arr
+};
+
+#[cfg(feature = "mceliece6688128")]
+static F_Y_COEFFS_6688128: [u16; 129] = {
+    let mut arr = [0u16; 129];
+    arr[0] = 1;
+    arr[1] = 1;
+    arr[2] = 1;
+    arr[7] = 1;
+    arr[128] = 1;
+    arr
+};
+
+#[cfg(feature = "mceliece6960119")]
+static F_Y_COEFFS_6960119: [u16; 120] = {
+    let mut arr = [0u16; 120];
+    arr[0] = 1;
+    arr[8] = 1;
+    arr[119] = 1;
+    arr
+};
+
+#[cfg(feature = "mceliece8192128")]
+static F_Y_COEFFS_8192128: [u16; 129] = {
+    let mut arr = [0u16; 129];
+    arr[0] = 1;
+    arr[1] = 1;
+    arr[2] = 1;
+    arr[7] = 1;
+    arr[128] = 1;
+    arr
+};
+
 #[cfg(feature = "mceliece348864")]
 pub const POLY_CAPACITY: usize = 128;
 
 #[cfg(feature = "mceliece460896")]
+pub const POLY_CAPACITY: usize = 256;
+
+#[cfg(feature = "mceliece6688128")]
+pub const POLY_CAPACITY: usize = 256;
+
+#[cfg(feature = "mceliece6960119")]
+pub const POLY_CAPACITY: usize = 256;
+
+#[cfg(feature = "mceliece8192128")]
 pub const POLY_CAPACITY: usize = 256;
 
 pub const MT: usize = (PARAMS.m as usize) * PARAMS.t;

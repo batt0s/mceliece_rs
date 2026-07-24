@@ -49,9 +49,8 @@ fn parse_kat(path: &str) -> Vec<KatVector> {
     vectors
 }
 
-#[test]
-fn test_kat_mceliece348864() {
-    let vectors = parse_kat("tests/data/kat_kem_mceliece348864.rsp");
+fn run_kat_test(path: &str) {
+    let vectors = parse_kat(path);
     assert!(!vectors.is_empty(), "No KAT vectors parsed");
 
     for (i, v) in vectors.iter().enumerate() {
@@ -85,4 +84,34 @@ fn test_kat_mceliece348864() {
             "Session Key Does Not Match"
         );
     }
+}
+
+#[cfg(feature = "mceliece348864")]
+#[test]
+fn test_kat_mceliece348864() {
+    run_kat_test("tests/data/mceliece348864/kat_kem.rsp");
+}
+
+#[cfg(feature = "mceliece460896")]
+#[test]
+fn test_kat_mceliece460896() {
+    run_kat_test("tests/data/mceliece460896/kat_kem.rsp");
+}
+
+#[cfg(feature = "mceliece6688128")]
+#[test]
+fn test_kat_mceliece6688128() {
+    run_kat_test("tests/data/mceliece6688128/kat_kem.rsp");
+}
+
+#[cfg(feature = "mceliece6960119")]
+#[test]
+fn test_kat_mceliece6960119() {
+    run_kat_test("tests/data/mceliece6960119/kat_kem.rsp");
+}
+
+#[cfg(feature = "mceliece8192128")]
+#[test]
+fn test_kat_mceliece8192128() {
+    run_kat_test("tests/data/mceliece8192128/kat_kem.rsp");
 }
