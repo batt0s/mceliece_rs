@@ -92,10 +92,22 @@ fn test_kat_mceliece348864() {
     run_kat_test("tests/data/mceliece348864/kat_kem.rsp");
 }
 
+#[cfg(feature = "mceliece348864f")]
+#[test]
+fn test_kat_mceliece348864f() {
+    run_kat_test("tests/data/mceliece348864f/kat_kem.rsp");
+}
+
 #[cfg(feature = "mceliece460896")]
 #[test]
 fn test_kat_mceliece460896() {
     run_kat_test("tests/data/mceliece460896/kat_kem.rsp");
+}
+
+#[cfg(feature = "mceliece460896f")]
+#[test]
+fn test_kat_mceliece460896f() {
+    run_kat_test("tests/data/mceliece460896f/kat_kem.rsp");
 }
 
 #[cfg(feature = "mceliece6688128")]
@@ -104,14 +116,32 @@ fn test_kat_mceliece6688128() {
     run_kat_test("tests/data/mceliece6688128/kat_kem.rsp");
 }
 
+#[cfg(feature = "mceliece6688128f")]
+#[test]
+fn test_kat_mceliece6688128f() {
+    run_kat_test("tests/data/mceliece6688128f/kat_kem.rsp");
+}
+
 #[cfg(feature = "mceliece6960119")]
 #[test]
 fn test_kat_mceliece6960119() {
     run_kat_test("tests/data/mceliece6960119/kat_kem.rsp");
 }
 
+#[cfg(feature = "mceliece6960119f")]
+#[test]
+fn test_kat_mceliece6960119f() {
+    run_kat_test("tests/data/mceliece6960119f/kat_kem.rsp");
+}
+
 #[cfg(feature = "mceliece8192128")]
 #[test]
 fn test_kat_mceliece8192128() {
     run_kat_test("tests/data/mceliece8192128/kat_kem.rsp");
+}
+
+#[cfg(feature = "mceliece8192128f")]
+#[test]
+fn test_kat_mceliece8192128f() {
+    run_kat_test("tests/data/mceliece8192128f/kat_kem.rsp");
 }

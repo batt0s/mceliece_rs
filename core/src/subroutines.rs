@@ -3,28 +3,35 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use crate::mceliece::{Ciphertext, PrivateKey, PublicKey, SessionKey, SysGF, SysPoly};
 use crate::params::{K_U64, PARAMS, POLY_CAPACITY};
 
-type MatGenRes = (Vec<u64>, Vec<SysGF>);
+type MatGenRes = (Vec<u64>, Vec<SysGF>, Vec<usize>);
 
-// McEliece Specification (Section 4.2) Matrix Generation for Goppa codes (Systematic form)
-// INPUT: g - generator polynomial, alphas - roots of the generator polynomial
-// OUTPUT: Some((T, )) if successful, None otherwise
-// TODO: Semi-systematic matrix generation
-pub fn matgen(g: &SysPoly, alphas: &[SysGF]) -> Option<MatGenRes> {
+// McEliece Specification (Section 4.2) Matrix Generation for Goppa codes.
+// Supports systematic form (mu=nu=0) and semi-systematic form (mu,nu>0).
+// INPUT:  g      - Goppa polynomial
+//         alphas - field elements α₀,…,α_{n-1}; permuted in-place for semi_systematic
+// OUTPUT: (MatGenRes, Choice)
+//   T_matrix   - mt × k public-key matrix (undefined if !is_valid)
+//   pivot_cols - length mt; for i ∈ [mt-µ, mt) holds the original pivot column cᵢ
+//   alphas - field elements α₀,…,α_{n-1}; permuted in-place for semi_systematic
+//   is_valid   - Choice, true iff reduction succeeded-systematic matrix generation
+pub fn matgen(g: &SysPoly, mut alphas: Vec<SysGF>) -> (MatGenRes, Choice) {
     let m = PARAMS.m as usize;
     let n = PARAMS.n;
     let t = PARAMS.t;
     let mt = m * t;
-
     let n_u64 = (n + 63) / 64;
 
+    // Build h_hat matrix
     let mut h_hat = vec![0u64; mt * n_u64];
-
     for j in 0..n {
         let a_j = alphas[j];
         let g_a_j = g.eval(a_j);
 
         if g_a_j.0 == 0 {
-            return None;
+            return (
+                (vec![0u64; mt * K_U64], alphas, vec![0usize; mt]),
+                Choice::from(0u8),
+            );
         }
 
         let g_inv = g_a_j.inv();
@@ -45,66 +52,140 @@ pub fn matgen(g: &SysPoly, alphas: &[SysGF]) -> Option<MatGenRes> {
         }
     }
 
-    let t_matrix = reduce_to_systematic_form(&mut h_hat, mt, n)?;
+    // Reduce to systematic form
+    let (t_matrix, pivots, is_valid) =
+        reduce_to_systematic_form(&mut h_hat, mt, n, PARAMS.mu, PARAMS.nu);
 
-    Some((t_matrix, alphas.to_vec()))
+    // Permute alphas according to pivot_cols
+    if PARAMS.semi_systematic {
+        for i in mt.saturating_sub(PARAMS.mu)..mt {
+            alphas.swap(i, pivots[i]);
+        }
+    }
+
+    ((t_matrix, alphas, pivots), is_valid)
 }
 
-fn reduce_to_systematic_form(matrix: &mut Vec<u64>, rows: usize, cols: usize) -> Option<Vec<u64>> {
+// Pack the µ pivot-column offsets into the 8-byte `c` field of the private key.
+// Each original pivot column cᵢ (for i ∈ [mt-µ, mt)) is stored as the
+// *offset* `c_i - (mt - µ)`, which fits in ⌈log_2(ν)⌉ bits.
+// µ values are packed LSB-first into the 8-byte buffer.
+pub fn pack_col_perm(pivot_cols: &[usize]) -> [u8; 8] {
+    let mu = PARAMS.mu;
+    let mt = (PARAMS.m as usize) * PARAMS.t;
+
+    if mu == 0 {
+        return [255, 255, 255, 255, 0, 0, 0, 0];
+    }
+
+    let base = mt - mu;
+
+    let mut pivots: u64 = 0;
+    for i in 0..mu {
+        let ci = pivot_cols[base + i];
+        let offset = ci - base;
+        pivots |= 1u64 << offset;
+    }
+
+    pivots.to_le_bytes()
+}
+
+fn reduce_to_systematic_form(
+    matrix: &mut Vec<u64>,
+    rows: usize,
+    cols: usize,
+    mu: usize,
+    nu: usize,
+) -> (Vec<u64>, Vec<usize>, Choice) {
     let k_cols = cols - rows; // n - mt
     let n_u64 = (cols + 63) / 64;
     let k_u64 = (k_cols + 63) / 64;
 
-    let mut is_invertible = Choice::from(1u8);
+    let mut is_valid = Choice::from(1u8);
+    let mut pivot_cols: Vec<usize> = (0..rows).collect();
 
     // Make the matrix row-echelon and reduced form (Gauss-Jordan elimination)
     for i in 0..rows {
-        let pivot_block = i / 64;
-        let pivot_bit_idx = i % 64;
+        let search_start = i;
+        let search_end = if i < rows.saturating_sub(mu) {
+            i
+        } else {
+            let max_col = i.saturating_add(nu).saturating_sub(mu);
+            max_col.min(cols.saturating_sub(1))
+        };
 
-        let pivot_bit_i = (matrix[i * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
-        let mut need_swap = Choice::from((1u64 ^ pivot_bit_i) as u8);
+        let mut found = Choice::from(0u8);
+        let mut pivot_col = i;
 
-        for j in (i + 1)..rows {
-            let pivot_bit_j = (matrix[j * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
-            let bit_j_choice = Choice::from(pivot_bit_j as u8);
+        for col in search_start..=search_end {
+            let c_block = col / 64;
+            let c_bit = col % 64;
 
-            let do_swap = need_swap & bit_j_choice;
+            let bit_i = (matrix[i * n_u64 + c_block] >> c_bit) & 1u64;
+            let mut has_one = Choice::from(bit_i as u8);
 
-            for c in 0..n_u64 {
-                let mut val_i = matrix[i * n_u64 + c];
-                let mut val_j = matrix[j * n_u64 + c];
-                u64::conditional_swap(&mut val_i, &mut val_j, do_swap);
+            let do_scan = !found;
+            for j in (i + 1)..rows {
+                let bit_j = (matrix[j * n_u64 + c_block] >> c_bit) & 1u64;
+                let bit_j_c = Choice::from(bit_j as u8);
+                let do_swap = do_scan & bit_j_c & !has_one;
 
-                matrix[i * n_u64 + c] = val_i;
-                matrix[j * n_u64 + c] = val_j;
+                for c in 0..n_u64 {
+                    let mut vi = matrix[i * n_u64 + c];
+                    let mut vj = matrix[j * n_u64 + c];
+                    u64::conditional_swap(&mut vi, &mut vj, do_swap);
+                    matrix[i * n_u64 + c] = vi;
+                    matrix[j * n_u64 + c] = vj;
+                }
+
+                has_one = has_one | (do_scan & bit_j_c);
             }
 
-            need_swap = need_swap & !do_swap;
+            let this_is_pivot = has_one & !found;
+            pivot_col = usize_cond_select(pivot_col, col, this_is_pivot);
+            found = found | this_is_pivot;
         }
 
-        let final_pivot = (matrix[i * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
-        is_invertible = is_invertible & Choice::from(final_pivot as u8);
+        is_valid = is_valid & found;
+        pivot_cols[i] = pivot_col;
 
+        let eb = pivot_col / 64;
+        let ebb = pivot_col % 64;
         for j in 0..rows {
             if i == j {
                 continue;
             }
-
-            let bit_j = (matrix[j * n_u64 + pivot_block] >> pivot_bit_idx) & 1u64;
-            let do_xor = Choice::from(bit_j as u8);
-
+            let bit = (matrix[j * n_u64 + eb] >> ebb) & 1u64;
+            let do_xor = Choice::from(bit as u8);
             for c in 0..n_u64 {
-                let current = matrix[j * n_u64 + c];
-                let xor_val = matrix[i * n_u64 + c];
-                let new_val = current ^ xor_val;
-                matrix[j * n_u64 + c] = u64::conditional_select(&current, &new_val, do_xor);
+                let cur = matrix[j * n_u64 + c];
+                let xor = matrix[i * n_u64 + c];
+                matrix[j * n_u64 + c] = u64::conditional_select(&cur, &(cur ^ xor), do_xor);
             }
         }
     }
 
-    if is_invertible.unwrap_u8() == 0 {
-        return None;
+    for i in rows.saturating_sub(mu)..rows {
+        let ci = pivot_cols[i];
+        if ci == i {
+            continue;
+        }
+
+        let i_block = i / 64;
+        let c_block = ci / 64;
+        let i_bit = i % 64;
+        let c_bit = ci % 64;
+
+        for row in 0..rows {
+            let ptr = row * n_u64;
+            let bit_i = (matrix[ptr + i_block] >> i_bit) & 1u64;
+            let bit_c = (matrix[ptr + c_block] >> c_bit) & 1u64;
+
+            matrix[ptr + i_block] &= !(1u64 << i_bit);
+            matrix[ptr + c_block] &= !(1u64 << c_bit);
+            matrix[ptr + i_block] |= bit_c << i_bit;
+            matrix[ptr + c_block] |= bit_i << c_bit;
+        }
     }
 
     let mut t_matrix = vec![0u64; rows * k_u64];
@@ -116,7 +197,12 @@ fn reduce_to_systematic_form(matrix: &mut Vec<u64>, rows: usize, cols: usize) ->
         }
     }
 
-    Some(t_matrix)
+    (t_matrix, pivot_cols, is_valid)
+}
+
+fn usize_cond_select(a: usize, b: usize, choice: Choice) -> usize {
+    let mask = ((choice.unwrap_u8() as i8) as usize).wrapping_neg();
+    a ^ ((a ^ b) & mask)
 }
 
 // McEliece Specification (Section 4.3) Encoding Subroutine
@@ -486,11 +572,10 @@ mod tests {
             }
         }
 
-        let result = reduce_to_systematic_form(&mut matrix, rows, cols);
+        let (result, _pivots, is_valid) = reduce_to_systematic_form(&mut matrix, rows, cols, 0, 0);
+        assert!(is_valid.unwrap_u8() != 0, "Not valid");
 
-        assert!(result.is_some(), "Returned None");
-
-        let t_matrix = result.unwrap();
+        let t_matrix = result;
 
         let k_cols = cols - rows;
         let k_u64 = (k_cols + 63) / 64;
@@ -523,15 +608,13 @@ mod tests {
             alphas.push(GF::new(i as u16));
         }
 
-        let result = matgen(&g, &alphas);
-
-        if let Some((t_matrix, out_alphas)) = result {
+        let ((t_matrix, out_alphas, pivots), is_valid) = matgen(&g, alphas);
+        if is_valid.unwrap_u8() != 0 {
             let mt = m * t;
-            let k = n - mt;
-
-            assert_eq!(t_matrix.len(), mt);
+            assert_eq!(t_matrix.len(), mt * K_U64);
             assert_eq!(t_matrix.len(), pk_size);
             assert_eq!(out_alphas.len(), n);
+            assert_eq!(pivots.len(), mt)
         }
     }
 

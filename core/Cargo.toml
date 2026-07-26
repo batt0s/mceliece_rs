@@ -1,6 +1,6 @@
 [package]
 name = "mceliece_rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["batt0s <me@battos.dev>"]
 description = "A Rust implementation of the Classic McEliece cryptosystem"
@@ -8,10 +8,15 @@ description = "A Rust implementation of the Classic McEliece cryptosystem"
 [features]
 default = ["mceliece348864"]
 mceliece348864 = []
+mceliece348864f = []
 mceliece460896 = []
+mceliece460896f = []
 mceliece6688128 = []
+mceliece6688128f = []
 mceliece6960119 = []
+mceliece6960119f = []
 mceliece8192128 = []
+mceliece8192128f = []
 
 [dependencies]
 rand = "0.8"

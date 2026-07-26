@@ -1,7 +1,7 @@
 use crate::gf::GF;
 use crate::params::{PARAMS, POLY_CAPACITY};
 use crate::poly::Polynomial;
-use crate::subroutines::{ct_sort, decode, encode, matgen, pack_bits, unpack_bits};
+use crate::subroutines::{ct_sort, decode, encode, matgen, pack_bits, pack_col_perm, unpack_bits};
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha3::{
@@ -309,15 +309,13 @@ pub fn seeded_keygen(mut seed: [u8; 32]) -> (PublicKey, PrivateKey) {
             }
         };
 
-        let (t_matrix, _) = match matgen(&g, &alphas) {
-            Some(res) => res,
-            None => {
-                seed = next_seed;
-                continue;
-            }
-        };
+        let ((t_matrix, alphas, pivots), is_valid) = matgen(&g, alphas);
+        if is_valid.unwrap_u8() == 0 {
+            seed = next_seed;
+            continue;
+        }
 
-        let c: [u8; 8] = [255, 255, 255, 255, 0, 0, 0, 0];
+        let c = pack_col_perm(&pivots);
 
         let pk = PublicKey { T: t_matrix };
         let sk = PrivateKey {
@@ -546,11 +544,7 @@ mod tests {
 
         assert_eq!(sk.alphas.len(), q, "Alphas vector should have q elements");
 
-        assert_eq!(
-            sk.c,
-            [255, 255, 255, 255, 0, 0, 0, 0],
-            "c vector should be constant"
-        );
+        assert_eq!(sk.c.len(), 8, "c vector should have 8 bytes");
     }
 
     #[test]
