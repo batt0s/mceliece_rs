@@ -6,7 +6,7 @@ authors = ["batt0s <me@battos.dev>"]
 description = "A Rust implementation of the Classic McEliece cryptosystem"
 
 [features]
-default = ["mceliece348864"]
+default = []
 mceliece348864 = []
 mceliece348864f = []
 mceliece460896 = []
