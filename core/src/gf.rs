@@ -49,6 +49,7 @@ impl<const M: u8> GF<M> {
     }
 }
 
+#[allow(clippy::suspicious_arithmetic_impl)]
 impl<const M: u8> Add for GF<M> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
@@ -73,15 +74,15 @@ impl<const M: u8> Mul for GF<M> {
             let bit = (a >> i) & 1;
             // let mask = -(bit as i16) as u32;
             // Branchless mask: 0xfffffffe if bit == 0, 0x00000000 if bit == 1
-            let mask = 0u32.wrapping_sub(bit as u32);
-            res ^= ((b as u32) << i) & mask;
+            let mask = 0u32.wrapping_sub(bit);
+            res ^= (b << i) & mask;
         }
 
         // Polynomial reduction mod p(x)
         let poly: u32 = Self::get_irreducible_poly();
         for i in (M..=(2 * M - 1)).rev() {
             let bit = (res >> i) & 1;
-            let mask = 0u32.wrapping_sub(bit as u32);
+            let mask = 0u32.wrapping_sub(bit);
             res ^= (poly << (i - M)) & mask;
         }
 

@@ -17,6 +17,7 @@ pub type Ciphertext = Vec<u8>;
 pub type SessionKey = [u8; 32];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[allow(non_snake_case)]
 pub struct PublicKey {
     pub T: Vec<u64>,
 }
@@ -28,7 +29,7 @@ impl PublicKey {
         let mt = (PARAMS.m as usize) * PARAMS.t;
         let k = PARAMS.k;
         let k_u64 = crate::params::K_U64;
-        let row_bytes = (k + 7) / 8;
+        let row_bytes = k.div_ceil(8);
 
         let mut out = vec![0u8; mt * row_bytes];
         for row in 0..mt {
@@ -191,7 +192,7 @@ pub fn generate_irreducible(bits: &[u16]) -> Option<SysPoly> {
         for i in 0..(PARAMS.m as usize) {
             let bit_index = j * (PARAMS.m as usize) + i;
             if bits[bit_index] == 1 {
-                beta_j.0 = beta_j.0 + SysGF::new(2).pow(i as u16).0;
+                beta_j.0 += SysGF::new(2).pow(i as u16).0;
             }
         }
         beta.coeffs[j] = beta_j;
@@ -232,8 +233,8 @@ pub fn generate_field_ordering(bytes: &[u8]) -> Option<Vec<SysGF>> {
 
     // Step 4: Bit reversal from pi(i) indexes, generate alphas
     let mut alphas: Vec<SysGF> = Vec::with_capacity(q);
-    for i in 0..q {
-        let pi_i = a[i].1;
+    for item in a.iter().take(q) {
+        let pi_i = item.1;
 
         let mut alpha_val = 0u16;
         for j in 0..PARAMS.m {
@@ -259,7 +260,7 @@ pub fn seeded_keygen(mut seed: [u8; 32]) -> (PublicKey, PrivateKey) {
     let t = PARAMS.t;
     let q = PARAMS.q;
 
-    let n_bytes = (n + 7) / 8;
+    let n_bytes = n.div_ceil(8);
     let a_bytes = 4 * q;
     let g_bytes = 2 * t;
 
@@ -396,9 +397,9 @@ pub fn generate_fixed_weight_with_rng<R: RngCore>(rng: &mut R) -> Vec<u8> {
         let mut e = vec![0u8; n];
 
         for secret_index in a {
-            for i in 0..n {
+            for (i, e_i) in e.iter_mut().enumerate() {
                 let is_match = (i as u32).ct_eq(&(secret_index as u32));
-                e[i] = u8::conditional_select(&e[i], &1, is_match)
+                *e_i = u8::conditional_select(e_i, &1, is_match)
             }
         }
 
@@ -441,13 +442,11 @@ pub fn encapsulate_with_rng<R: RngCore>(pk: &PublicKey, rng: &mut R) -> (Ciphert
 // Takes as input a ciphertext C and a private key, outputs a session key.
 pub fn decapsulate(c: &Ciphertext, sk: &PrivateKey) -> SessionKey {
     // Step 1: Set b <- 1
-    let mut b = 1u8;
-
     // Step 2: Extract s and Gamma' from private key
     let s = &sk.s;
 
     // Step 3: e <- DECODE(C, Gamma')
-    let (decoded_e, is_valid) = decode(c, &sk);
+    let (decoded_e, is_valid) = decode(c, sk);
 
     let mut e = [0u8; PARAMS.n];
 
@@ -456,7 +455,7 @@ pub fn decapsulate(c: &Ciphertext, sk: &PrivateKey) -> SessionKey {
     for i in 0..PARAMS.n {
         e[i] = u8::conditional_select(&s_bits[i], &decoded_e[i], is_valid);
     }
-    b = is_valid.unwrap_u8();
+    let b = is_valid.unwrap_u8();
 
     // Step 4: Compute K = H(b, e, C)
     let e_bytes = pack_bits(&e);

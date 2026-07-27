@@ -1,6 +1,6 @@
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
-use crate::mceliece::{Ciphertext, PrivateKey, PublicKey, SessionKey, SysGF, SysPoly};
+use crate::mceliece::{Ciphertext, PrivateKey, PublicKey, SysGF, SysPoly};
 use crate::params::{K_U64, PARAMS, POLY_CAPACITY};
 
 type MatGenRes = (Vec<u64>, Vec<SysGF>, Vec<usize>);
@@ -19,7 +19,7 @@ pub fn matgen(g: &SysPoly, mut alphas: Vec<SysGF>) -> (MatGenRes, Choice) {
     let n = PARAMS.n;
     let t = PARAMS.t;
     let mt = m * t;
-    let n_u64 = (n + 63) / 64;
+    let n_u64 = n.div_ceil(64);
 
     // Build h_hat matrix
     let mut h_hat = vec![0u64; mt * n_u64];
@@ -58,8 +58,13 @@ pub fn matgen(g: &SysPoly, mut alphas: Vec<SysGF>) -> (MatGenRes, Choice) {
 
     // Permute alphas according to pivot_cols
     if PARAMS.semi_systematic {
-        for i in mt.saturating_sub(PARAMS.mu)..mt {
-            alphas.swap(i, pivots[i]);
+        for (i, &pivot) in pivots
+            .iter()
+            .enumerate()
+            .take(mt)
+            .skip(mt.saturating_sub(PARAMS.mu))
+        {
+            alphas.swap(i, pivot);
         }
     }
 
@@ -91,15 +96,15 @@ pub fn pack_col_perm(pivot_cols: &[usize]) -> [u8; 8] {
 }
 
 fn reduce_to_systematic_form(
-    matrix: &mut Vec<u64>,
+    matrix: &mut [u64],
     rows: usize,
     cols: usize,
     mu: usize,
     nu: usize,
 ) -> (Vec<u64>, Vec<usize>, Choice) {
     let k_cols = cols - rows; // n - mt
-    let n_u64 = (cols + 63) / 64;
-    let k_u64 = (k_cols + 63) / 64;
+    let n_u64 = cols.div_ceil(64);
+    let k_u64 = k_cols.div_ceil(64);
 
     let mut is_valid = Choice::from(1u8);
     let mut pivot_cols: Vec<usize> = (0..rows).collect();
@@ -138,15 +143,15 @@ fn reduce_to_systematic_form(
                     matrix[j * n_u64 + c] = vj;
                 }
 
-                has_one = has_one | (do_scan & bit_j_c);
+                has_one |= do_scan & bit_j_c;
             }
 
             let this_is_pivot = has_one & !found;
             pivot_col = usize_cond_select(pivot_col, col, this_is_pivot);
-            found = found | this_is_pivot;
+            found |= this_is_pivot;
         }
 
-        is_valid = is_valid & found;
+        is_valid &= found;
         pivot_cols[i] = pivot_col;
 
         let eb = pivot_col / 64;
@@ -165,8 +170,12 @@ fn reduce_to_systematic_form(
         }
     }
 
-    for i in rows.saturating_sub(mu)..rows {
-        let ci = pivot_cols[i];
+    for (i, &ci) in pivot_cols
+        .iter()
+        .enumerate()
+        .take(rows)
+        .skip(rows.saturating_sub(mu))
+    {
         if ci == i {
             continue;
         }
@@ -216,9 +225,7 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
     let mut c_bits = vec![0u8; mt];
 
     // 1. C = e_1
-    for i in 0..mt {
-        c_bits[i] = e[i];
-    }
+    c_bits[..mt].copy_from_slice(&e[..mt]);
 
     let mut e2_blocks = vec![0u64; k_u64];
     for j in 0..k {
@@ -227,14 +234,14 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
     }
 
     // 2. C = C xor T_j for each j such that e_{mt+j} = 1 (C = C + T * e_2)
-    for i in 0..mt {
+    for (i, c_bit) in c_bits.iter_mut().enumerate().take(mt) {
         let mut dot_product = 0u64;
-        for c in 0..k_u64 {
-            dot_product ^= pk.T[i * k_u64 + c] & e2_blocks[c];
+        for (c, e2_block) in e2_blocks.iter().enumerate().take(k_u64) {
+            dot_product ^= pk.T[i * k_u64 + c] & e2_block;
         }
 
         let parity = (dot_product.count_ones() % 2) as u8;
-        c_bits[i] ^= parity;
+        *c_bit ^= parity;
     }
 
     c_bits
@@ -243,7 +250,7 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
 // McEliece Specification (Section 6.2) Representation of objects as byte strings
 // Pack bits into bytes (Little-endian)
 pub fn pack_bits(bits: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![0u8; (bits.len() + 7) / 8];
+    let mut bytes = vec![0u8; bits.len().div_ceil(8)];
     for (i, &bit) in bits.iter().enumerate() {
         bytes[i / 8] |= bit << (i % 8);
     }
@@ -267,12 +274,12 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
     let mt = (PARAMS.m as usize) * t;
 
     // Step 1: Extend C to v = (C, 0, 0, ..., 0) in F_2^n by appending k zeros
-    let mut v = unpack_bits(&c, mt);
+    let mut v = unpack_bits(c, mt);
     v.resize(n, 0);
 
     // Step 2: Find unique c in F_2^n such that Hc = 0 and c has Hamming distance <= t from v.
     // Step 2.1: Compute Syndrome S(x) = sum_{j=0}^{n-1} v_j / (x - alpha_j) mod g(x)
-    let (s_poly, s_valid) = compute_syndrome(&v, &sk);
+    let (s_poly, s_valid) = compute_syndrome(&v, sk);
 
     // Step 2.2: Find sigma(x) error locator polynomial using the Patterson algorithm
     let (sigma_poly, patterson_valid) = patterson_error_locator(&s_poly, &sk.g);
@@ -281,8 +288,8 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
     let (e, is_chien_valid) = chien_search(&sigma_poly, &sk.alphas, n);
 
     let mut weight = 0usize;
-    for i in 0..n {
-        weight += e[i] as usize;
+    for &bit in e.iter().take(n) {
+        weight += bit as usize;
     }
 
     // Step 4: If wt(e) = t and C = He, return e. Otherwise return None.
@@ -309,15 +316,15 @@ fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> (SysPoly, Choice) {
     let mut s_poly = SysPoly::zero();
     let mut all_valid = Choice::from(1u8);
 
-    for j in 0..PARAMS.n {
+    for (j, &v_j) in v.iter().enumerate().take(PARAMS.n) {
         let mut denom = SysPoly::zero();
         denom.coeffs[0] = sk.alphas[j];
         denom.coeffs[1] = SysGF::new(1);
 
         let (inv, is_invertible) = denom.inv_mod(&sk.g, PARAMS.t);
-        all_valid = all_valid & is_invertible;
+        all_valid &= is_invertible;
 
-        let mask = Choice::from(v[j]);
+        let mask = Choice::from(v_j);
 
         for i in 0..POLY_CAPACITY {
             s_poly.coeffs[i] = SysGF::conditional_select(
@@ -335,7 +342,7 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
 
     // 1. T(x) = S(x)^-1 mod g(x)
     let (t_poly, t_valid) = s_poly.inv_mod(g, PARAMS.t);
-    valid = valid & t_valid;
+    valid &= t_valid;
 
     // 2. R(x) = T(x) + x mod g(x)
     let mut r_poly = t_poly;
@@ -354,7 +361,7 @@ fn patterson_error_locator(s_poly: &SysPoly, g: &SysPoly) -> (SysPoly, Choice) {
     }
 
     let (g_odd_inv, g_odd_valid) = g_odd.inv_mod(g, PARAMS.t);
-    valid = valid & g_odd_valid;
+    valid &= g_odd_valid;
     let sqrt_x = (&g_even * &g_odd_inv).reduce(g, PARAMS.t);
 
     // Extract odd and even R(x)
@@ -413,7 +420,7 @@ fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> Choice {
     let (e_syndrome, _e_valid) = compute_syndrome(e, sk);
     let mut is_equal = Choice::from(1u8);
     for i in 0..PARAMS.t {
-        is_equal = is_equal & e_syndrome.coeffs[i].0.ct_eq(&s_poly.coeffs[i].0);
+        is_equal &= e_syndrome.coeffs[i].0.ct_eq(&s_poly.coeffs[i].0);
     }
     is_equal
 }
@@ -490,7 +497,7 @@ pub fn ct_patterson_eea(g: &SysPoly, q: &SysPoly) -> (SysPoly, SysPoly) {
             saved_a.coeffs[i] =
                 SysGF::conditional_select(&saved_a.coeffs[i], &a0.coeffs[i], should_save);
         }
-        has_saved = has_saved | should_save;
+        has_saved |= should_save;
 
         // 2. CT Swap: if deg(r0) < deg(r1), swap
         let is_r0_lesser = Choice::from((deg_r0 < deg_r1) as u8);

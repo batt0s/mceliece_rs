@@ -2,15 +2,16 @@ use crate::gf::GF;
 use std::ops::{Index, Mul};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
-// Macro for creating polynomials
+// Macro for creating polynomials, used in tests
+#[cfg(test)]
 macro_rules! poly {
     ( $( $x:expr ),* ) => {
         {
             let mut temp_vec = Vec::new();
             $(
-                temp_vec.push(crate::gf::GF::new($x));
+                temp_vec.push($crate::gf::GF::new($x));
             )*
-            crate::poly::Polynomial::from_slice(&temp_vec)
+            $crate::poly::Polynomial::from_slice(&temp_vec)
         }
     };
 }
@@ -33,9 +34,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         let mut coeffs = [GF::new(0); N];
 
         let copy_len = slice.len().min(N);
-        for i in 0..copy_len {
-            coeffs[i] = slice[i];
-        }
+        coeffs[..copy_len].copy_from_slice(&slice[..copy_len]);
 
         Polynomial { coeffs }
     }
@@ -48,7 +47,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
             let is_nonzero = !self.coeffs[i].ct_eq(&GF::new(0));
             let update = is_nonzero & !found;
             res = u32::conditional_select(&res, &(i as u32), update);
-            found = found | is_nonzero;
+            found |= is_nonzero;
         }
         res as usize
     }
@@ -61,7 +60,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
             let update = is_nonzero & !found;
 
             leading = GF::conditional_select(&leading, &self.coeffs[i], update);
-            found = found | is_nonzero;
+            found |= is_nonzero;
         }
         leading
     }
@@ -69,7 +68,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     pub fn is_zero(&self) -> Choice {
         let mut res = Choice::from(1);
         for i in 0..N {
-            res = res & self.coeffs[i].ct_eq(&GF::new(0));
+            res &= self.coeffs[i].ct_eq(&GF::new(0));
         }
         res
     }
@@ -112,7 +111,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
             let is_nonzero = !self.coeffs[i].ct_eq(&GF::new(0));
             let update = is_nonzero & !found;
             leading = GF::conditional_select(&leading, &self.coeffs[i], update);
-            found = found | is_nonzero;
+            found |= is_nonzero;
         }
 
         // If the leading coefficient is zero, mask it to avoid division by zero
@@ -244,7 +243,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
             let d = Self::gcd(&u_minus_x, self, expected_deg);
 
             let deg_is_zero = Choice::from((d.deg() == 0) as u8);
-            is_irred = is_irred & deg_is_zero;
+            is_irred &= deg_is_zero;
         }
 
         let correct_deg = Choice::from((self.deg() == expected_deg) as u8);
@@ -268,6 +267,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     }
 
     // Divide-and-conquer product tree for polynomial multiplication, reduced mod f_y
+    #[allow(dead_code)]
     fn product_tree(factors: &[Self], f_y: &Self) -> Self {
         match factors.len() {
             0 => {
@@ -369,8 +369,8 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         // because minpoly lands back in GF(2^M)[y] — extract those scalars
         let mut result = Self::zero();
         let len = acc.len().min(N);
-        for i in 0..len {
-            result.coeffs[i] = acc[i].coeffs[0];
+        for (i, item) in acc.iter().enumerate().take(len) {
+            result.coeffs[i] = item.coeffs[0];
         }
 
         result.make_monic();
