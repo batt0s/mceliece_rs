@@ -1,3 +1,4 @@
+// You can get the KAT vectors from classic.mceliece.org: https://classic.mceliece.org/nist/mceliece-kat-20221023.tar.gz
 use hex;
 use mceliece_rs::mceliece::{encapsulate_with_rng, seeded_keygen};
 use std::fs::File;
