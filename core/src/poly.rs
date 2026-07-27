@@ -126,46 +126,6 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
     }
 
-    pub fn div_rem(dividend: &Self, divisor: &Self) -> (Self, Self) {
-        let mut rem = *dividend;
-        let mut div = *divisor;
-
-        if div.is_zero().unwrap_u8() == 1 {
-            panic!("divisor is zero");
-        }
-
-        let rem_deg = rem.deg();
-        let div_deg = div.deg();
-
-        if rem_deg < div_deg {
-            return (Self::zero(), *dividend);
-        }
-
-        let mut q = Self::zero();
-        let div_lead_inv = div.coeffs[div_deg].inv();
-
-        while rem.is_zero().unwrap_u8() == 0 && rem.deg() >= div.deg() {
-            let cur_rem_deg = rem.deg();
-            let cur_div_deg = div.deg();
-            let deg_diff = cur_rem_deg - cur_div_deg;
-
-            let rem_lead = rem.coeffs[cur_rem_deg];
-            let ratio = rem_lead * div_lead_inv;
-
-            if deg_diff < N {
-                q.coeffs[deg_diff] = ratio;
-            }
-
-            for i in 0..N {
-                if deg_diff + i < N {
-                    rem.coeffs[deg_diff + i] = rem.coeffs[deg_diff + i] + (ratio * div.coeffs[i]);
-                }
-            }
-        }
-
-        (q, rem)
-    }
-
     // Constant time polynomial division with remainder
     // The divisor must be monic and the divisor must be non-zero
     // d is the degree of the divisor
@@ -177,7 +137,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
             divisor.deg()
         );
         debug_assert!(
-            !divisor.is_zero().unwrap_u8() == 1,
+            divisor.is_zero().unwrap_u8() == 0,
             "ct_div_rem: divisor must be non-zero"
         );
 
@@ -533,15 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn test_poly_div_rem() {
-        let p: TestPoly = poly![1, 1, 1, 1]; // x^3 + x^2 + x + 1
-        let q: TestPoly = poly![1, 1]; // x + 1
-        let (div, rem) = TestPoly::div_rem(&p, &q);
-        assert_eq!(div, poly![1, 0, 1]); // x^2 + 1
-        assert_eq!(rem.is_zero().unwrap_u8(), 1);
-    }
-
-    #[test]
     fn test_poly_ct_div_rem() {
         let p: TestPoly = poly![1, 1, 1, 1]; // x^3 + x^2 + x + 1
         let q: TestPoly = poly![1, 1]; // x + 1
@@ -625,8 +576,7 @@ mod tests {
             result = TestPoly::from_slice(&res);
 
             let prod = &beta_pow * &beta;
-            let (_, rem) = TestPoly::div_rem(&prod, &f_y);
-            beta_pow = rem;
+            beta_pow = prod.reduce(&f_y, f_y.deg());
         }
 
         assert_eq!(
