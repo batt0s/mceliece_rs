@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature:
+          - mceliece348864
+          - mceliece348864f
+          - mceliece460896
+          - mceliece460896f
+          - mceliece6688128
+          - mceliece6688128f
+          - mceliece6960119
+          - mceliece6960119f
+          - mceliece8192128
+          - mceliece8192128f
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run unit tests (${{ matrix.feature }})
+      run: cargo test --lib --verbose --release --features ${{ matrix.feature }}
+      # Does not run KAT, since the test vectors are not included in the repository

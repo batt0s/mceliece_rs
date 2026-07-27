@@ -1,6 +1,8 @@
 # Constant-Time Classic McEliece in Rust
 
-[![Build Status](https://github.com/batt0s/mceliece_rs/actions/workflows/rust.yml/badge.svg)](https://github.com/batt0s/mceliece_rs/actions)
+[![Lint](https://github.com/batt0s/mceliece_rs/actions/workflows/lint.yml/badge.svg)](https://github.com/batt0s/mceliece_rs/actions/workflows/lint.yml)
+[![Build](https://github.com/batt0s/mceliece_rs/actions/workflows/build.yml/badge.svg)](https://github.com/batt0s/mceliece_rs/actions/workflows/build.yml)
+[![Test](https://github.com/batt0s/mceliece_rs/actions/workflows/test.yml/badge.svg)](https://github.com/batt0s/mceliece_rs/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > **⚠️ WARNING / SECURITY NOTICE ⚠️**

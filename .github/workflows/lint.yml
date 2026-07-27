@@ -1,0 +1,40 @@
+name: Lint
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check formatting
+      run: cargo fmt --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature:
+          - mceliece348864
+          - mceliece348864f
+          - mceliece460896
+          - mceliece460896f
+          - mceliece6688128
+          - mceliece6688128f
+          - mceliece6960119
+          - mceliece6960119f
+          - mceliece8192128
+          - mceliece8192128f
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run clippy (${{ matrix.feature }})
+      run: cargo clippy --features ${{ matrix.feature }} -- -D warnings

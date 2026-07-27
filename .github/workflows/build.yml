@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature:
+          - mceliece348864
+          - mceliece348864f
+          - mceliece460896
+          - mceliece460896f
+          - mceliece6688128
+          - mceliece6688128f
+          - mceliece6960119
+          - mceliece6960119f
+          - mceliece8192128
+          - mceliece8192128f
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build (${{ matrix.feature }})
+      run: cargo build --verbose --release --features ${{ matrix.feature }}
