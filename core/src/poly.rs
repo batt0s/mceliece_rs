@@ -16,20 +16,31 @@ macro_rules! poly {
     };
 }
 
+/// Polynomial over GF(2^M) with capacity N coefficients.
+///
+/// Coefficients are stored in an array `coeffs` where `coeffs[i]`
+/// corresponds to the coefficient of x^i. The polynomial degree can
+/// be at most N-1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Polynomial<const M: u8, const N: usize> {
     pub coeffs: [GF<M>; N],
 }
 
 impl<const M: u8, const N: usize> Polynomial<M, N> {
+    /// Creates a polynomial from an array of coefficients.
     pub fn new(coeffs: [GF<M>; N]) -> Self {
         Polynomial { coeffs }
     }
 
+    /// Returns the zero polynomial (all coefficients set to 0).
     pub const fn zero() -> Self {
         Polynomial { coeffs: [GF(0); N] }
     }
 
+    /// Creates a polynomial from a slice of field elements.
+    ///
+    /// If the slice is shorter than N, the remaining coefficients
+    /// are set to zero. If the slice is longer than N, it is truncated.
     pub fn from_slice(slice: &[GF<M>]) -> Self {
         let mut coeffs = [GF::new(0); N];
 
@@ -39,7 +50,14 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         Polynomial { coeffs }
     }
 
-    // Constant time degree calculation
+    /// Computes the degree of the polynomial in constant time.
+    ///
+    /// Returns the largest index i such that coeffs[i] != 0, or 0
+    /// if the polynomial is the zero polynomial.
+    ///
+    /// # Constant-time
+    /// Yes. Scans all N coefficients using bitwise operations and
+    /// conditional selection.
     pub fn deg(&self) -> usize {
         let mut res = 0u32;
         let mut found = Choice::from(0);
@@ -52,6 +70,13 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         res as usize
     }
 
+    /// Returns the leading coefficient of the polynomial.
+    ///
+    /// The leading coefficient is the coefficient of the highest-degree
+    /// non-zero term. Returns 0 if the polynomial is zero.
+    ///
+    /// # Constant-time
+    /// Yes. Scans all N coefficients using conditional selection.
     pub fn lead(&self) -> GF<M> {
         let mut leading = GF::new(0);
         let mut found = Choice::from(0);
@@ -65,6 +90,13 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         leading
     }
 
+    /// Checks whether the polynomial is the zero polynomial.
+    ///
+    /// Returns `Choice(1)` if all coefficients are zero, `Choice(0)`
+    /// otherwise.
+    ///
+    /// # Constant-time
+    /// Yes. ANDs together the equality checks for all coefficients.
     pub fn is_zero(&self) -> Choice {
         let mut res = Choice::from(1);
         for i in 0..N {
@@ -73,6 +105,13 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         res
     }
 
+    /// Conditionally swaps two polynomials in constant time.
+    ///
+    /// If `choice` is `Choice(1)`, `a` and `b` are swapped; otherwise
+    /// they remain unchanged.
+    ///
+    /// # Constant-time
+    /// Yes. Performs a masked swap on every coefficient pair.
     #[inline(always)]
     pub fn swap(a: &mut Self, b: &mut Self, choice: Choice) {
         for i in 0..N {
@@ -83,7 +122,13 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
     }
 
-    // Shifts all coefficients down by one position, with the last coefficient set to zero (i.e., the polynomial is divided by x)
+    /// Shifts all coefficients down by one position.
+    ///
+    /// This corresponds to dividing the polynomial by x.
+    /// The last (highest-index) coefficient is set to zero.
+    ///
+    /// # Constant-time
+    /// Yes. Iterates over all N-1 coefficients unconditionally.
     #[inline(always)]
     pub fn shift_down(&mut self) {
         for i in 0..N - 1 {
@@ -92,7 +137,10 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         self.coeffs[N - 1] = GF::new(0);
     }
 
-    // Horner's method for polynomial evaluation
+    /// Evaluates the polynomial at `x` using Horner's method.
+    ///
+    /// # Constant-time
+    /// Yes. Iterates over all N coefficients unconditionally.
     pub fn eval(&self, x: GF<M>) -> GF<M> {
         let mut res = GF::new(0);
         for i in (0..N).rev() {
@@ -101,7 +149,15 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         res
     }
 
-    // Constant time monic normalization
+    /// Normalizes the polynomial to monic form in constant time.
+    ///
+    /// Multiplies every coefficient by the inverse of the leading
+    /// coefficient. If the polynomial is the zero polynomial, the
+    /// operation is masked to avoid division by zero.
+    ///
+    /// # Constant-time
+    /// Yes. Uses conditional selection throughout to avoid leaking
+    /// the position or value of the leading coefficient.
     pub fn make_monic(&mut self) {
         let mut leading = GF::new(0);
         let mut found = Choice::from(0);
@@ -125,9 +181,15 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
     }
 
-    // Constant time polynomial division with remainder
-    // The divisor must be monic and the divisor must be non-zero
-    // d is the degree of the divisor
+    /// Constant-time polynomial division with remainder.
+    ///
+    /// Computes `dividend / divisor` and `dividend % divisor` where
+    /// the divisor must be monic and non-zero. `d` is the degree of
+    /// the divisor.
+    ///
+    /// # Constant-time
+    /// Yes. All loops iterate a fixed number of times (N - d iterations
+    /// for the outer loop, d iterations for the inner loop).
     pub fn ct_div_rem(dividend: &Self, divisor: &Self, d: usize) -> (Self, Self) {
         debug_assert!(
             divisor.deg() == d,
@@ -158,7 +220,14 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         (q, rem)
     }
 
-    // Bernstein-Yang SafeGCD algorithm for constant-time polynomial GCD computation (Paper Chapter 3)
+    /// Bernstein-Yang SafeGCD algorithm for constant-time polynomial GCD.
+    ///
+    /// Computes `gcd(a, b)` over GF(2^M)[x]. The result is normalized
+    /// to monic form.
+    ///
+    /// # Constant-time
+    /// Yes. Runs for exactly `2 * max_deg + 1` iterations regardless of
+    /// the input polynomials. All operations use conditional selection.
     pub fn gcd(a: &Self, b: &Self, max_deg: usize) -> Self {
         let mut f = *a;
         let mut g = *b;
@@ -190,13 +259,20 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         f
     }
 
-    // Handbook of Applied Cryptography, Algorithm 2.227, Repeated square-and-multiply algorithm for exponentiation in F_q^m
-    // INPUT: a polynomial g in F_q^m (&self), and an integer 0 <= k < p^m - 1 (where F_q^m = Z_p[x]/f)
-    // OUTPUT: the result of g^k mod f
-    // The iteration count is fixed at the bit-width of usize (typically 64),
-    // making this constant-time regardless of the exponent's Hamming weight.
-    // The result is correct only when k < 2^64 — which holds for all internal
-    // callers (k = 1 << M with M ∈ {12, 13}).
+    /// Repeated square-and-multiply for polynomial exponentiation in F_q^m.
+    ///
+    /// Computes `self^k mod f` where `f` has degree `f_deg`.
+    ///
+    /// The iteration count is fixed at the bit-width of `usize` (typically 64),
+    /// making this constant-time regardless of the exponent's Hamming weight.
+    /// The result is correct only when k < 2^64 — which holds for all internal
+    /// callers (k = 1 << M with M ∈ {12, 13}).
+    ///
+    /// Reference: Handbook of Applied Cryptography, Algorithm 2.227
+    ///
+    /// # Constant-time
+    /// Yes. The loop iterates exactly `usize::BITS` times regardless of
+    /// the exponent value.
     pub fn mod_pow(&self, k: usize, f: &Self, f_deg: usize) -> Self {
         let mut s = Self::zero();
         s.coeffs[0] = GF(1);
@@ -223,10 +299,15 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         s
     }
 
-    // Handbook of Applied Cryptography, Algorithm 4.69, Testing a polynomial for irreducibility (Ben-Or)
-    // INPUT: a prime p and a monic polynomial f of degree m over Z_p[x]
-    // OUTPUT: an answer to the question "is f irreducible over Z_p[x]?"
-    // The algorithm is modified from the original to make it constant time
+    /// Ben-Or irreducibility test (constant-time variant).
+    ///
+    /// Tests whether the polynomial is irreducible over GF(2^M)[x].
+    ///
+    /// Reference: Handbook of Applied Cryptography, Algorithm 4.69
+    ///
+    /// # Constant-time
+    /// Yes. The algorithm has been modified from the original to use
+    /// fixed iteration counts and avoid early termination.
     pub fn is_irreducible(&self, expected_deg: usize) -> Choice {
         let mut u = Self::zero();
         u.coeffs[1] = GF::new(1);
@@ -251,8 +332,13 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         is_irred & correct_deg
     }
 
-    // constant time reduce
-    // self mod f
+    /// Reduction of a polynomial modulo `f`.
+    ///
+    /// Computes `self mod f` where `f` has degree `t`.
+    ///
+    /// # Constant-time
+    /// Yes. Iterates from degree t to N-1 unconditionally with
+    /// branchless operations.
     pub fn reduce(&self, f: &Self, t: usize) -> Self {
         let mut r = self.coeffs;
         for i in (t..N).rev() {
@@ -266,7 +352,10 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         Polynomial::new(r)
     }
 
-    // Divide-and-conquer product tree for polynomial multiplication, reduced mod f_y
+    /// Divide-and-conquer product tree for polynomial multiplication.
+    ///
+    /// Recursively multiplies a list of polynomials together,
+    /// reducing modulo `f_y` at each step.
     #[allow(dead_code)]
     fn product_tree(factors: &[Self], f_y: &Self) -> Self {
         match factors.len() {
@@ -288,11 +377,11 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
     }
 
-    fn product_tree_ext(
-        factors: &[Self], // the conjugates directly
-        f_y: &Self,
-    ) -> Vec<Self> {
-        // outer poly coefficients
+    /// Extended product tree building outer polynomial coefficients.
+    ///
+    /// Given conjugates [a_0, ..., a_{k-1}], builds the outer polynomial
+    /// (X - a_0)(X - a_1)...(X - a_{k-1}) via divide-and-conquer.
+    fn product_tree_ext(factors: &[Self], f_y: &Self) -> Vec<Self> {
         match factors.len() {
             0 => {
                 let mut p = Self::zero();
@@ -330,8 +419,10 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
     }
 
-    // Square a polynomial in characteristic 2, reduced mod f.
-    // (sum a_i * y^i)^2 = sum a_i^2 * y^(2i)  -- cross terms vanish
+    /// Frobenius squaring in characteristic 2.
+    ///
+    /// Computes `p^2 mod f`. In characteristic 2, (sum a_i y^i)^2 =
+    /// sum a_i^2 y^(2i) since cross terms vanish.
     fn frobenius_sq(p: &Self, f: &Self) -> Self {
         let deg = p.deg();
         let mut res = Self::zero();
@@ -341,9 +432,10 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         res.reduce(f, f.deg())
     }
 
-    // Apply Frobenius: p -> p^(2^M) mod f
-    // Instead of mod_pow(2^M, f) which does 2^M iterations,
-    // we do M squarings — from 8192 iterations down to 13.
+    /// Full Frobenius automorphism: p -> p^(2^M) mod f.
+    ///
+    /// Instead of `mod_pow(2^M, f)` which does 2^M iterations,
+    /// we do M squarings — from 8192 iterations down to 13.
     fn frobenius(&self, f: &Self) -> Self {
         let mut result = *self;
         for _ in 0..M {
@@ -352,8 +444,15 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         result
     }
 
+    /// Computes the minimal polynomial of `self` in GF(2^M)[y].
+    ///
+    /// Collects conjugates via the Frobenius automorphism and
+    /// multiplies them as (X - conj) factors.
+    ///
+    /// # Constant-time
+    /// Partially. The number of conjugates is fixed at `expected_deg`,
+    /// but the result uses heap allocation for the product tree.
     pub fn minpoly(&self, f_y: &Self, expected_deg: usize) -> Self {
-        // Collect conjugates via Frobenius: beta, beta^q, beta^(q^2), ...
         let mut conjugates: Vec<Self> = Vec::with_capacity(expected_deg);
         let mut current = *self;
 
@@ -377,8 +476,14 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         result
     }
 
-    // Bernstein-Yang SafeGCD algorithm for polynomial inversion modulo f (A^-1 mod M)
-    // Returns (inverse, is_invertible) where is_invertible is 1 if the inverse exists, 0 otherwise
+    /// Bernstein-Yang SafeGCD for polynomial inversion modulo `m`.
+    ///
+    /// Returns `(inverse, is_invertible)` where `is_invertible` is
+    /// `Choice(1)` if the inverse exists and `Choice(0)` otherwise.
+    ///
+    /// # Constant-time
+    /// Yes. Runs for exactly `2 * max_deg + 1` iterations. All
+    /// data-dependent branches use conditional selection.
     pub fn inv_mod(&self, m: &Self, max_deg: usize) -> (Self, Choice) {
         let mut f = *m;
         let mut g = *self;
@@ -438,6 +543,7 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
     }
 }
 
+/// Index into a polynomial's coefficient array.
 impl<const M: u8, const N: usize> Index<usize> for Polynomial<M, N> {
     type Output = GF<M>;
 
@@ -446,6 +552,14 @@ impl<const M: u8, const N: usize> Index<usize> for Polynomial<M, N> {
     }
 }
 
+/// Polynomial multiplication (convolution) in GF(2^M)[x].
+///
+/// Multiplies two polynomials using schoolbook O(N^2) multiplication.
+/// The result is truncated to capacity N (coefficients of degree >= N
+/// are silently dropped).
+///
+/// # Constant-time
+/// Yes. All loops iterate N×N times unconditionally.
 impl<const M: u8, const N: usize> Mul for &Polynomial<M, N> {
     type Output = Polynomial<M, N>;
 

@@ -5,15 +5,24 @@ use crate::params::{K_U64, PARAMS, POLY_CAPACITY};
 
 type MatGenRes = (Vec<u64>, Vec<SysGF>, Vec<usize>);
 
-// McEliece Specification (Section 4.2) Matrix Generation for Goppa codes.
-// Supports systematic form (mu=nu=0) and semi-systematic form (mu,nu>0).
-// INPUT:  g      - Goppa polynomial
-//         alphas - field elements α₀,…,α_{n-1}; permuted in-place for semi_systematic
-// OUTPUT: (MatGenRes, Choice)
-//   T_matrix   - mt × k public-key matrix (undefined if !is_valid)
-//   pivot_cols - length mt; for i ∈ [mt-µ, mt) holds the original pivot column cᵢ
-//   alphas - field elements α₀,…,α_{n-1}; permuted in-place for semi_systematic
-//   is_valid   - Choice, true iff reduction succeeded-systematic matrix generation
+/// McEliece Specification (Section 4.2) Matrix Generation for Goppa codes.
+///
+/// Supports systematic form (mu=nu=0) and semi-systematic form (mu,nu>0).
+///
+/// # Arguments
+/// * `g` - Goppa polynomial
+/// * `alphas` - Field elements α₀,…,α_{n-1}; permuted in-place for semi-systematic
+///
+/// # Returns
+/// `(MatGenRes, Choice)` where:
+/// * `T_matrix` - mt × k public-key matrix (undefined if `!is_valid`)
+/// * `pivot_cols` - length mt; for i ∈ [mt-µ, mt) holds the original pivot column cᵢ
+/// * `alphas` - Permuted field elements (for semi-systematic form)
+/// * `is_valid` - `Choice(1)` iff reduction succeeded
+///
+/// # Constant-time
+/// No. Contains an early return when `g_a_j == 0`, and the semi-systematic
+/// alpha permutation branch is data-dependent.
 pub fn matgen(g: &SysPoly, mut alphas: Vec<SysGF>) -> (MatGenRes, Choice) {
     let m = PARAMS.m as usize;
     let n = PARAMS.n;
@@ -71,10 +80,15 @@ pub fn matgen(g: &SysPoly, mut alphas: Vec<SysGF>) -> (MatGenRes, Choice) {
     ((t_matrix, alphas, pivots), is_valid)
 }
 
-// Pack the µ pivot-column offsets into the 8-byte `c` field of the private key.
-// Each original pivot column cᵢ (for i ∈ [mt-µ, mt)) is stored as the
-// *offset* `c_i - (mt - µ)`, which fits in ⌈log_2(ν)⌉ bits.
-// µ values are packed LSB-first into the 8-byte buffer.
+/// Pack the µ pivot-column offsets into the 8-byte `c` field of the private key.
+///
+/// Each original pivot column cᵢ (for i ∈ [mt-µ, mt)) is stored as the
+/// *offset* `c_i - (mt - µ)`, which fits in ⌈log_2(ν)⌉ bits.
+/// µ values are packed LSB-first into the 8-byte buffer.
+///
+/// # Constant-time
+/// No. Contains an early return for `mu == 0` and uses data-dependent
+/// iteration over the mu columns.
 pub fn pack_col_perm(pivot_cols: &[usize]) -> [u8; 8] {
     let mu = PARAMS.mu;
     let mt = (PARAMS.m as usize) * PARAMS.t;
@@ -214,9 +228,10 @@ fn usize_cond_select(a: usize, b: usize, choice: Choice) -> usize {
     a ^ ((a ^ b) & mask)
 }
 
-// McEliece Specification (Section 4.3) Encoding Subroutine
-// INPUT: a weight-t column vector e in F_2^n and a public key T
-// OUTPUT: a vector C in F_2^mt
+/// McEliece Specification (Section 4.3) Encoding Subroutine.
+///
+/// Encodes a weight-t column vector `e` in F_2^n using a public key `T`
+/// into a ciphertext `C` in F_2^mt.
 pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
     let mt = (PARAMS.m as usize) * PARAMS.t;
     let k = PARAMS.k;
@@ -247,8 +262,7 @@ pub fn encode(e: &[u8], pk: &PublicKey) -> Vec<u8> {
     c_bits
 }
 
-// McEliece Specification (Section 6.2) Representation of objects as byte strings
-// Pack bits into bytes (Little-endian)
+/// McEliece Specification (Section 6.2) Pack bits into bytes (Little-endian).
 pub fn pack_bits(bits: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0u8; bits.len().div_ceil(8)];
     for (i, &bit) in bits.iter().enumerate() {
@@ -257,7 +271,7 @@ pub fn pack_bits(bits: &[u8]) -> Vec<u8> {
     bytes
 }
 
-// Unpack bytes into bits (Little-endian)
+/// Unpack bytes into bits (Little-endian).
 pub fn unpack_bits(bytes: &[u8], num_bits: usize) -> Vec<u8> {
     let mut bits = Vec::with_capacity(num_bits);
     for i in 0..num_bits {
@@ -266,8 +280,15 @@ pub fn unpack_bits(bytes: &[u8], num_bits: usize) -> Vec<u8> {
     bits
 }
 
-// McEliece Specification (Section 4.4) Decoding subroutine
-// Decodes C in F_2^mt to a word e of Hamming weight wt(e) = t with C = He if such a word exists; otherwise it returns failure.
+/// McEliece Specification (Section 4.4) Decoding subroutine.
+///
+/// Decodes `C` in F_2^mt to a word `e` of Hamming weight `wt(e) = t`
+/// with `C = He` if such a word exists; otherwise returns failure.
+///
+/// # Constant-time
+/// Yes. Returns `(Vec<u8>, Choice)` where the caller can use `Choice`
+/// to mask the result. No early returns — all steps execute fully
+/// regardless of intermediate validity.
 pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
     let n = PARAMS.n;
     let t = PARAMS.t;
@@ -425,7 +446,14 @@ fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> Choice {
     is_equal
 }
 
-// Constant time bitonic sort
+/// Constant-time bitonic sort for `(value, index)` pairs.
+///
+/// Sorts by value while preserving the associated index.
+///
+/// # Constant-time
+/// Yes. The number of compare-exchange operations depends only on
+/// `arr.len()`, not on the data values. All comparisons use
+/// `overflowing_sub` and `conditional_select`.
 pub fn ct_sort(arr: &mut [(u32, u32)]) {
     let n = arr.len();
     let mut k = 2;
@@ -466,7 +494,15 @@ pub fn ct_sort(arr: &mut [(u32, u32)]) {
     }
 }
 
-// Constant Time Patterson EEA
+/// Constant Time Patterson Extended Euclidean Algorithm.
+///
+/// Solves `a(x) * Q(x) = b(x) (mod g)` by division steps.
+/// Returns `(r, a)` where `r` and `a` are the saved polynomials
+/// from the iteration where `deg(r0)` first drops below `t/2`.
+///
+/// # Constant-time
+/// Yes. Runs for exactly `2 * t` iterations regardless of inputs.
+/// All data-dependent decisions use conditional selection.
 pub fn ct_patterson_eea(g: &SysPoly, q: &SysPoly) -> (SysPoly, SysPoly) {
     let mut r0 = *g;
     let mut r1 = *q;

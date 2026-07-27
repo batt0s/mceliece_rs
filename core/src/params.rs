@@ -1,18 +1,33 @@
 use crate::gf::GF;
 use crate::poly::Polynomial;
 
+/// McEliece parameter set configuration.
+///
+/// Defines all constants for a specific parameter set as specified in
+/// the Classic McEliece standard (NIST submission).
 #[derive(Debug)]
 pub struct McElieceParams {
+    /// Extension degree of the Goppa code field GF(2^m).
     pub m: u8,
+    /// Code length n = 2^m.
     pub n: usize,
+    /// Error-correction capability (maximum number of correctable errors).
     pub t: usize,
+    /// Field size q = 2^m.
     pub q: usize,
+    /// Code dimension k = n - m*t.
     pub k: usize,
+    /// Irreducible polynomial for GF(2^m), f(z).
     pub f_z: u32,
+    /// Coefficients of the Goppa polynomial f(y).
     pub f_y_coeffs: &'static [u16],
+    /// Security level (in bits). 256 for all NIST parameter sets.
     pub l: usize,
+    /// Whether to use semi-systematic form (fast variants).
     pub semi_systematic: bool,
+    /// Semi-systematic mu parameter (number of untrusted columns).
     pub mu: usize,
+    /// Semi-systematic nu parameter (search window width).
     pub nu: usize,
 }
 
@@ -218,26 +233,35 @@ static F_Y_COEFFS_8192128: [u16; 129] = {
     arr
 };
 
+/// Polynomial capacity for the non-semi-systematic 348864 parameter set.
 #[cfg(any(feature = "mceliece348864", feature = "mceliece348864f"))]
 pub const POLY_CAPACITY: usize = 128;
 
+/// Polynomial capacity for the 460896 parameter set.
 #[cfg(any(feature = "mceliece460896", feature = "mceliece460896f"))]
 pub const POLY_CAPACITY: usize = 256;
 
+/// Polynomial capacity for the 6688128 parameter set.
 #[cfg(any(feature = "mceliece6688128", feature = "mceliece6688128f"))]
 pub const POLY_CAPACITY: usize = 256;
 
+/// Polynomial capacity for the 6960119 parameter set.
 #[cfg(any(feature = "mceliece6960119", feature = "mceliece6960119f"))]
 pub const POLY_CAPACITY: usize = 256;
 
+/// Polynomial capacity for the 8192128 parameter set.
 #[cfg(any(feature = "mceliece8192128", feature = "mceliece8192128f"))]
 pub const POLY_CAPACITY: usize = 256;
 
+/// Number of bits in the public key: m * t (the Goppa code dimension in bits).
 pub const MT: usize = (PARAMS.m as usize) * PARAMS.t;
+/// Number of 64-bit words needed to represent k bits.
 pub const K_U64: usize = PARAMS.k.div_ceil(64);
+/// Size of the public key T matrix in 64-bit words: mt * k_u64.
 pub const PK_SIZE: usize = MT * K_U64;
 
 impl McElieceParams {
+    /// Builds the Goppa polynomial f(y) from the stored coefficients.
     pub fn f_y<const M: u8>(&self) -> Polynomial<M, POLY_CAPACITY> {
         let mut poly = Polynomial::zero();
         let len = self.f_y_coeffs.len().min(POLY_CAPACITY);

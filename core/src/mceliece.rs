@@ -10,15 +10,24 @@ use sha3::{
 };
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
+/// The field GF(2^m) element type for the active parameter set.
 pub type SysGF = GF<{ PARAMS.m }>;
+/// The polynomial type over GF(2^m) for the active parameter set.
 pub type SysPoly = Polynomial<{ PARAMS.m }, POLY_CAPACITY>;
 
+/// Ciphertext produced by encapsulation.
 pub type Ciphertext = Vec<u8>;
+/// Session key produced by (de)capsulation — 256-bit (32-byte) output.
 pub type SessionKey = [u8; 32];
 
+/// Classic McEliece public key.
+///
+/// Contains the compressed public-key matrix T (mt × k bits, stored in
+/// 64-bit words). Can be serialized via [`to_bytes`](PublicKey::to_bytes).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[allow(non_snake_case)]
 pub struct PublicKey {
+    /// Public-key matrix T (mt rows of k bits each, packed into u64 words).
     pub T: Vec<u64>,
 }
 
@@ -43,16 +52,27 @@ impl PublicKey {
     }
 }
 
+/// Classic McEliece private key.
+///
+/// Contains the seed `delta`, semi-systematic column pack `c`,
+/// Goppa polynomial `g`, field ordering `alphas`, and random string `s`.
 pub struct PrivateKey {
+    /// Seed used to (re)generate this key.
     pub delta: [u8; 32],
+    /// Semi-systematic column permutation info (8 bytes).
     pub c: [u8; 8],
+    /// Goppa polynomial g(x) of degree t.
     pub g: SysPoly,
+    /// Field ordering — the n field elements α₀,…,α_{n-1}.
     pub alphas: Vec<SysGF>,
+    /// Random string s of length ceil(n/8) bytes.
     pub s: Vec<u8>,
 }
 
 impl PrivateKey {
     /// Partial Classic McEliece spec (Section 6.2) secret key encoding.
+    ///
+    /// Serializes the private key as: delta || c || g_coeffs || controlbits || s.
     pub fn to_bytes(&self) -> Vec<u8> {
         let t = PARAMS.t;
         let m = PARAMS.m;
@@ -175,9 +195,15 @@ fn controlbits(pi: &[u32]) -> Vec<u8> {
     result
 }
 
-// Classic McEliece Specifications (Section 5.1) Irreducible-polynomial Generation
-// The following algorithm Irreducible takes a string of sigma_1*t input bits d_0 , d_1 , . . . , d_{sigma_1 t−1} . It
-// outputs either ⊥ or a monic irreducible degree-t polynomial g in F_q[x].
+/// Classic McEliece Specifications (Section 5.1) Irreducible-polynomial Generation.
+///
+/// Takes a string of `sigma_1 * t` input bits and outputs either `None` or
+/// a monic irreducible degree-t polynomial g in F_q[x].
+///
+/// # Constant-time
+/// No. Returns `None` (early return) when the bit length is wrong or when
+/// `deg(g) != t`. This is a keygen function where the spec accepts
+/// non-constant-time failure modes.
 pub fn generate_irreducible(bits: &[u16]) -> Option<SysPoly> {
     let t = PARAMS.t;
 
@@ -205,7 +231,15 @@ pub fn generate_irreducible(bits: &[u16]) -> Option<SysPoly> {
     if g.deg() == t { Some(g) } else { None }
 }
 
-// Classic McEliece Specification (Section 5.2) Field-Ordering Generation
+/// Classic McEliece Specification (Section 5.2) Field-Ordering Generation.
+///
+/// Reads 32-bit values from `bytes`, sorts them using constant-time sort,
+/// and generates the field ordering `alphas` via bit reversal.
+///
+/// # Constant-time
+/// No. Returns `None` (early return) when the byte length is wrong or
+/// when duplicate values are found. The `ct_sort` used internally is
+/// constant-time, but the distinctness check uses an early-exit loop.
 pub fn generate_field_ordering(bytes: &[u8]) -> Option<Vec<SysGF>> {
     let q = PARAMS.q;
 
@@ -249,12 +283,29 @@ pub fn generate_field_ordering(bytes: &[u8]) -> Option<Vec<SysGF>> {
     Some(alphas)
 }
 
+/// Generates a key pair using system entropy.
+///
+/// Equivalent to `seeded_keygen(rand::thread_rng().fill(&mut seed))`.
+///
+/// # Constant-time
+/// No. Key generation inherently uses rejection sampling loops and
+/// may run for an unbounded number of iterations. Per the spec,
+/// keygen timing leaks are an accepted trade-off.
 pub fn keygen() -> (PublicKey, PrivateKey) {
     let mut seed = [0u8; 32];
     rand::thread_rng().fill(&mut seed);
     seeded_keygen(seed)
 }
 
+/// Deterministic key generation from a 32-byte seed.
+///
+/// Uses SHAKE-256 to derive randomness for the Goppa polynomial, field
+/// ordering, and s-vector. Retries with a fresh seed if any step fails.
+///
+/// # Constant-time
+/// No. Key generation uses rejection sampling loops and may run for
+/// an unbounded number of iterations. Per the spec, keygen timing leaks
+/// are an accepted trade-off.
 pub fn seeded_keygen(mut seed: [u8; 32]) -> (PublicKey, PrivateKey) {
     let n = PARAMS.n;
     let t = PARAMS.t;
@@ -330,16 +381,28 @@ pub fn seeded_keygen(mut seed: [u8; 32]) -> (PublicKey, PrivateKey) {
     }
 }
 
-// Classic McEliece Specification (Section 5.4) Fixed-weight-vector generation
-// The following randomized algorithm takes no input.
-// It outputs a vector e in F_2^n such that the Hamming weight of e is t.
-// The algorithm uses a precomputed integer tau >= t. The integer tau is defined as
-// if n = q; as 2t if q/2 <= n < q; as 4t if q/4 <= n < q/2; etc.
-// All of the selected parameter sets have q/2 <= n < q, so tau in {t, 2t}.
+/// Classic McEliece Specification (Section 5.4) Fixed-weight-vector generation.
+///
+/// Generates a random vector `e` in F_2^n with Hamming weight `t`.
+/// Uses system entropy.
+///
+/// # Constant-time
+/// No. Uses rejection sampling (potentially unbounded loop) to find
+/// sufficient distinct indices less than n.
 pub fn generate_fixed_weight() -> Vec<u8> {
     generate_fixed_weight_with_rng(&mut rand::thread_rng())
 }
 
+/// Fixed-weight-vector generation with a provided RNG.
+///
+/// Generates a vector `e` in F_2^n with Hamming weight `t`. The
+/// inner loop uses constant-time distinctness checking via
+/// `ct_sort`. However, the outer rejection loop is not constant-time.
+///
+/// # Constant-time
+/// Partially. The distinctness check uses constant-time `ct_sort`
+/// and `ct_eq`, but the outer rejection sampling loop may iterate
+/// an unbounded number of times.
 pub fn generate_fixed_weight_with_rng<R: RngCore>(rng: &mut R) -> Vec<u8> {
     let n = PARAMS.n;
     let t = PARAMS.t;
@@ -408,12 +471,30 @@ pub fn generate_fixed_weight_with_rng<R: RngCore>(rng: &mut R) -> Vec<u8> {
     }
 }
 
-// McEliece Specification (Section 5.5) Encapsulation
-// Takes a public key T. It outputs a ciphertext C and a session key K.
+/// McEliece Specification (Section 5.5) Encapsulation.
+///
+/// Takes a public key and outputs a ciphertext `C` and a 256-bit session key `K`.
+/// Uses system entropy.
+///
+/// # Constant-time
+/// Partially. Internally calls `generate_fixed_weight_with_rng` which uses
+/// rejection sampling.
 pub fn encapsulate(pk: &PublicKey) -> (Ciphertext, SessionKey) {
     encapsulate_with_rng(pk, &mut rand::thread_rng())
 }
 
+/// Encapsulation with a provided RNG.
+///
+/// # Arguments
+/// * `pk` - The recipient's public key
+/// * `rng` - A cryptographically secure RNG
+///
+/// # Returns
+/// `(Ciphertext, SessionKey)` — the ciphertext and derived session key.
+///
+/// # Constant-time
+/// Partially. Calls `generate_fixed_weight_with_rng` which uses rejection
+/// sampling. The session key derivation via SHAKE-256 is constant-time.
 pub fn encapsulate_with_rng<R: RngCore>(pk: &PublicKey, rng: &mut R) -> (Ciphertext, SessionKey) {
     // Step 1: Generate a random vector e with weight t.
     let e = generate_fixed_weight_with_rng(rng);
@@ -438,8 +519,19 @@ pub fn encapsulate_with_rng<R: RngCore>(pk: &PublicKey, rng: &mut R) -> (Ciphert
     (c_bytes, k)
 }
 
-// McEliece Specification (Section 5.6) Decapsulation
-// Takes as input a ciphertext C and a private key, outputs a session key.
+/// McEliece Specification (Section 5.6) Decapsulation.
+///
+/// Takes a ciphertext `C` and a private key, outputs a 256-bit session key.
+///
+/// If decoding fails, the session key is derived from the private key's `s`
+/// string instead of the decoded error vector, preventing decryption failures
+/// from leaking information.
+///
+/// # Constant-time
+/// Yes. Regardless of whether decoding succeeds or fails, the function
+/// produces a session key using the same code paths. The `is_valid`
+/// `Choice` from `decode` is used to conditionally select between
+/// `decoded_e` and `s_bits` using `u8::conditional_select`.
 pub fn decapsulate(c: &Ciphertext, sk: &PrivateKey) -> SessionKey {
     // Step 1: Set b <- 1
     // Step 2: Extract s and Gamma' from private key
