@@ -8,7 +8,7 @@ use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
 };
-use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 pub type SysGF = GF<{ PARAMS.m }>;
 pub type SysPoly = Polynomial<{ PARAMS.m }, POLY_CAPACITY>;
@@ -87,7 +87,7 @@ fn reverse_bits(value: u16, m: u8) -> u32 {
 /// composeinv(c, pi) = c . pi^-1, per the spec's Python `composeinv`.
 fn composeinv(c: &[u32], pi: &[u32]) -> Vec<u32> {
     let mut pairs: Vec<(u32, u32)> = pi.iter().copied().zip(c.iter().copied()).collect();
-    pairs.sort_by_key(|&(x, _)| x);
+    ct_sort(&mut pairs);
     pairs.into_iter().map(|(_, y)| y).collect()
 }
 
@@ -378,16 +378,17 @@ pub fn generate_fixed_weight_with_rng<R: RngCore>(rng: &mut R) -> Vec<u8> {
         }
 
         // Step 4: If not all distinct, repeat from Step 1
-        let mut a_sorted = a.clone();
-        a_sorted.sort_unstable();
-        let mut distinct = true;
+        let mut a_sorted: Vec<(u32, u32)> = a
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (x as u32, i as u32))
+            .collect();
+        ct_sort(&mut a_sorted);
+        let mut distinct = Choice::from(1u8);
         for i in 1..t {
-            if a_sorted[i] == a_sorted[i - 1] {
-                distinct = false;
-                break;
-            }
+            distinct &= !a_sorted[i].0.ct_eq(&a_sorted[i - 1].0);
         }
-        if !distinct {
+        if distinct.unwrap_u8() == 0 {
             continue;
         }
 
