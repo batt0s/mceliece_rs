@@ -456,18 +456,30 @@ fn verify_syndrome(e: &[u8], sk: &PrivateKey, s_poly: &SysPoly) -> Choice {
 /// `overflowing_sub` and `conditional_select`.
 pub fn ct_sort(arr: &mut [(u32, u32)]) {
     let n = arr.len();
-    let mut k = 2;
+    // Pad to the next power of two with sentinel values (u32::MAX, u32::MAX).
+    // Bitonic sort requires the array length to be a power of two. For
+    // arbitrary-length arrays (e.g., t=96 for mceliece460896), we pad with
+    // sentinels that sort to the end, ensuring all real elements are correctly
+    // compared and sorted.
+    let next_pow2 = n.next_power_of_two();
 
-    while k <= n {
+    let mut padded: Vec<(u32, u32)> = Vec::with_capacity(next_pow2);
+    padded.extend(arr.iter().copied());
+    for _ in n..next_pow2 {
+        padded.push((u32::MAX, u32::MAX));
+    }
+
+    let mut k = 2;
+    while k <= next_pow2 {
         let mut j = k / 2;
         while j > 0 {
-            for i in 0..n {
+            for i in 0..next_pow2 {
                 let l = i ^ j;
                 if l > i {
                     let dir = (i & k) == 0;
 
-                    let a_val = arr[i].0;
-                    let b_val = arr[l].0;
+                    let a_val = padded[i].0;
+                    let b_val = padded[l].0;
 
                     // is b_val greater than a_val?
                     let (_, borrow) = b_val.overflowing_sub(a_val);
@@ -478,20 +490,27 @@ pub fn ct_sort(arr: &mut [(u32, u32)]) {
                         should_swap = !should_swap;
                     }
 
-                    let temp_val_i = u32::conditional_select(&arr[i].0, &arr[l].0, should_swap);
-                    let temp_val_l = u32::conditional_select(&arr[l].0, &arr[i].0, should_swap);
+                    let temp_val_i =
+                        u32::conditional_select(&padded[i].0, &padded[l].0, should_swap);
+                    let temp_val_l =
+                        u32::conditional_select(&padded[l].0, &padded[i].0, should_swap);
 
-                    let temp_idx_i = u32::conditional_select(&arr[i].1, &arr[l].1, should_swap);
-                    let temp_idx_l = u32::conditional_select(&arr[l].1, &arr[i].1, should_swap);
+                    let temp_idx_i =
+                        u32::conditional_select(&padded[i].1, &padded[l].1, should_swap);
+                    let temp_idx_l =
+                        u32::conditional_select(&padded[l].1, &padded[i].1, should_swap);
 
-                    arr[i] = (temp_val_i, temp_idx_i);
-                    arr[l] = (temp_val_l, temp_idx_l);
+                    padded[i] = (temp_val_i, temp_idx_i);
+                    padded[l] = (temp_val_l, temp_idx_l);
                 }
             }
             j /= 2;
         }
         k *= 2;
     }
+
+    // Copy the sorted real elements back
+    arr[..n].copy_from_slice(&padded[..n]);
 }
 
 /// Constant Time Patterson Extended Euclidean Algorithm.
