@@ -50,6 +50,33 @@ impl PublicKey {
         }
         out
     }
+
+    /// Deserialize a public key from its canonical byte representation.
+    ///
+    /// Parses the packed T matrix (mt rows of ceil(k/8) bytes each, LSB-first).
+    /// Returns `None` if the input has the wrong length.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mt = (PARAMS.m as usize) * PARAMS.t;
+        let k = PARAMS.k;
+        let k_u64 = crate::params::K_U64;
+        let row_bytes = k.div_ceil(8);
+
+        let expected_len = mt * row_bytes;
+        if bytes.len() != expected_len {
+            return None;
+        }
+
+        let mut t_mat = vec![0u64; mt * k_u64];
+        for row in 0..mt {
+            for bit_idx in 0..k {
+                let byte_val = bytes[row * row_bytes + bit_idx / 8];
+                let bit = (byte_val >> (bit_idx % 8)) & 1;
+                t_mat[row * k_u64 + bit_idx / 64] |= (bit as u64) << (bit_idx % 64);
+            }
+        }
+
+        Some(PublicKey { T: t_mat })
+    }
 }
 
 /// Classic McEliece private key.
@@ -92,6 +119,79 @@ impl PrivateKey {
 
         out.extend_from_slice(&self.s);
         out
+    }
+
+    /// Deserialize a private key from its canonical byte representation.
+    ///
+    /// Parses the format: delta (32) || c (8) || g_coeffs (t×2) || controlbits || s.
+    /// Returns `None` if the input has the wrong length.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let m = PARAMS.m as usize;
+        let t = PARAMS.t;
+        let q = PARAMS.q;
+        let n = PARAMS.n;
+
+        let n_bytes = n.div_ceil(8);
+
+        // Control bits size: C(q) = q/2 * (2*m - 1) raw bits for a Benes network
+        // permuting q = 2^m elements.
+        let cb_bits_count = (q / 2) * (2 * m - 1);
+        let cb_bytes = cb_bits_count.div_ceil(8);
+
+        // g coefficients: degree t, monic (leading coefficient = 1 is implicit)
+        // The serialization stores coefficients 0..t-1 (t elements).
+        let g_bytes = t * 2;
+
+        let expected_len = 32 + 8 + g_bytes + cb_bytes + n_bytes;
+        if bytes.len() != expected_len {
+            return None;
+        }
+
+        let mut offset = 0;
+
+        // delta: 32 bytes
+        let mut delta = [0u8; 32];
+        delta.copy_from_slice(&bytes[offset..offset + 32]);
+        offset += 32;
+
+        // c: 8 bytes (pivot-column bitmap, stored as-is)
+        let mut c = [0u8; 8];
+        c.copy_from_slice(&bytes[offset..offset + 8]);
+        offset += 8;
+
+        // g coefficients: t × 2 bytes each (u16 little-endian).
+        // Only coefficients 0..t-1 are stored; the monic leading
+        // coefficient (y^t) is implicitly 1.
+        let mut g_coeffs = [SysGF::new(0); POLY_CAPACITY];
+        for coeff in g_coeffs.iter_mut().take(t) {
+            let val = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            *coeff = SysGF::new(val);
+            offset += 2;
+        }
+        g_coeffs[t] = SysGF::new(1); // monic leading coefficient
+        let g = Polynomial::new(g_coeffs);
+
+        // Control bits: unpack from bytes, decode to permutation, convert to alphas
+        let cb_packed = &bytes[offset..offset + cb_bytes];
+        let cb_bits = crate::subroutines::unpack_bits(cb_packed, cb_bits_count);
+        let pi = controlbits_decode(&cb_bits, q);
+        let mut alphas = Vec::with_capacity(q);
+        for &p in &pi {
+            let alpha_val = reverse_bits(p as u16, PARAMS.m) as u16;
+            alphas.push(SysGF::new(alpha_val));
+        }
+        offset += cb_bytes;
+
+        // s: n_bytes
+        let s = bytes[offset..offset + n_bytes].to_vec();
+
+        Some(PrivateKey {
+            delta,
+            c,
+            g,
+            alphas,
+            s,
+        })
     }
 }
 
@@ -193,6 +293,73 @@ fn controlbits(pi: &[u32]) -> Vec<u8> {
     result.extend(z);
     result.extend(l);
     result
+}
+
+/// Inverse of `controlbits`.
+///
+/// Given the raw control bits (each element is 0 or 1) and the permutation
+/// size n (must be a power of two), reconstructs the permutation pi such
+/// that `controlbits(pi) == bits`.
+fn controlbits_decode(bits: &[u8], n: usize) -> Vec<u32> {
+    let mut m = 1u32;
+    while (1usize << m) < n {
+        m += 1;
+    }
+    assert_eq!(
+        1usize << m,
+        n,
+        "controlbits_decode input size must be a power of two"
+    );
+
+    if m == 1 {
+        // n = 2: a single control bit.
+        // bits[0] == 0 → pi = [0, 1]; bits[0] == 1 → pi = [1, 0]
+        let b = bits[0] as u32;
+        return vec![b, b ^ 1];
+    }
+
+    let half = n / 2;
+
+    // Structure of the bit stream: f (n/2 bits) || z (recursive) || l (n/2 bits)
+    let f = &bits[..half];
+    let l = &bits[bits.len() - half..];
+    let z = &bits[half..bits.len() - half];
+
+    // De-interleave z: even indices → z0, odd indices → z1
+    let sub_len = z.len() / 2;
+    let mut z0 = Vec::with_capacity(sub_len);
+    let mut z1 = Vec::with_capacity(sub_len);
+    for i in 0..sub_len {
+        z0.push(z[2 * i]);
+        z1.push(z[2 * i + 1]);
+    }
+
+    // Recursively decode sub-permutations
+    let sub_m0 = controlbits_decode(&z0, half);
+    let sub_m1 = controlbits_decode(&z1, half);
+
+    // Reconstruct m_arr from the decoded sub-permutations.
+    // Encoding split: m_arr[2*j] / 2 → sub_m0[j], m_arr[2*j+1] / 2 → sub_m1[j]
+    let mut m_arr = vec![0u32; n];
+    for j in 0..half {
+        m_arr[2 * j] = 2 * sub_m0[j];
+        m_arr[2 * j + 1] = 2 * sub_m1[j] + 1;
+    }
+
+    // Reconstruct pi = big_F ∘ m_arr ∘ big_L.
+    // Encoding: m_arr = big_F ∘ pi ∘ big_L   (composeinv(big_F, pi_inv) = big_F ∘ pi)
+    // Both big_F and big_L are involutions (self-inverse), so:
+    // pi = big_F ∘ m_arr ∘ big_L
+    // where big_F[x] = x ^ f[x/2] and big_L[y] = y ^ l[y/2]
+    let mut pi = vec![0u32; n];
+    for i in 0..n {
+        let after_l = (i as u32) ^ (l[i / 2] as u32);
+        let after_m = m_arr[after_l as usize];
+        let after_f = after_m ^ (f[(after_m / 2) as usize] as u32);
+        pi[i] = after_f;
+    }
+
+    pi
 }
 
 /// Classic McEliece Specifications (Section 5.1) Irreducible-polynomial Generation.
@@ -614,7 +781,6 @@ mod tests {
     fn test_keygen() {
         let (pk, sk) = keygen();
 
-        let m = PARAMS.m as usize;
         let n = PARAMS.n;
         let t = PARAMS.t;
         let q = PARAMS.q;
@@ -733,6 +899,70 @@ mod tests {
         assert_ne!(
             k_enc, k_dec_tampered,
             "Tampered ciphertext should not yield same session key"
+        );
+    }
+
+    #[test]
+    fn test_pk_roundtrip() {
+        let (pk, _) = seeded_keygen([9u8; 32]);
+        let bytes = pk.to_bytes();
+        let pk2 = PublicKey::from_bytes(&bytes).expect("from_bytes should succeed");
+        assert_eq!(
+            pk.T, pk2.T,
+            "Public key T matrices should match after round-trip"
+        );
+    }
+
+    #[test]
+    fn test_pk_from_bytes_wrong_len() {
+        assert!(
+            PublicKey::from_bytes(&[]).is_none(),
+            "Empty bytes should return None"
+        );
+        assert!(
+            PublicKey::from_bytes(&[0u8; 1]).is_none(),
+            "Short bytes should return None"
+        );
+    }
+
+    #[test]
+    fn test_sk_roundtrip() {
+        let (_, sk) = seeded_keygen([10u8; 32]);
+        let bytes = sk.to_bytes();
+        let sk2 = PrivateKey::from_bytes(&bytes).expect("from_bytes should succeed");
+
+        assert_eq!(sk.delta, sk2.delta, "delta should match");
+        assert_eq!(sk.c, sk2.c, "c should match");
+        assert_eq!(sk.g.coeffs, sk2.g.coeffs, "g coefficients should match");
+        assert_eq!(sk.alphas, sk2.alphas, "alphas should match");
+        assert_eq!(sk.s, sk2.s, "s should match");
+    }
+
+    #[test]
+    fn test_sk_from_bytes_wrong_len() {
+        assert!(
+            PrivateKey::from_bytes(&[]).is_none(),
+            "Empty bytes should return None"
+        );
+    }
+
+    #[test]
+    fn test_full_serialization_roundtrip() {
+        // Full life-cycle: keygen → serialize both keys → deserialize → encaps/decaps
+        let (pk, sk) = seeded_keygen([11u8; 32]);
+
+        let pk_bytes = pk.to_bytes();
+        let sk_bytes = sk.to_bytes();
+
+        let pk2 = PublicKey::from_bytes(&pk_bytes).expect("PK deserialize");
+        let sk2 = PrivateKey::from_bytes(&sk_bytes).expect("SK deserialize");
+
+        let (ct, k1) = encapsulate(&pk2);
+        let k2 = decapsulate(&ct, &sk2);
+
+        assert_eq!(
+            k1, k2,
+            "Session key should match after serialize/deserialize round-trip"
         );
     }
 }
