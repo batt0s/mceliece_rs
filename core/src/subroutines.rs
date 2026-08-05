@@ -333,24 +333,64 @@ pub fn decode(c: &Ciphertext, sk: &PrivateKey) -> (Vec<u8>, Choice) {
     (e, is_valid)
 }
 
+/// Computes the syndrome S(x) = Σ_j v_j · (x − α_j)⁻¹ mod g(x) of a word `v`.
+///
+/// # Fast inversion of linear factors
+///
+/// The textbook definition inverts (x − α_j) mod g(x) with a full polynomial
+/// inversion for every position j, at Θ(t²) field multiplications each. For a
+/// *linear* denominator there is a closed form. Let
+///
+///     h_j(x) = (g(x) − g(α_j)) / (x − α_j)
+///
+/// (well-defined because the numerator vanishes at x = α_j). Since
+/// g(α_j) is a scalar, g(x) ≡ 0 (mod g(x)), and the field has characteristic
+/// two (−1 = 1):
+///
+///     (x − α_j) · h_j(x) · g(α_j)⁻¹  =  g(x)·g(α_j)⁻¹ − 1  ≡  1  (mod g(x))
+///
+/// so (x − α_j)⁻¹ ≡ h_j(x) · g(α_j)⁻¹ (mod g(x)). Both g(α_j) and the
+/// coefficients of h_j come out of one Horner pass (t multiplications), and
+/// g(α_j)⁻¹ is a single constant-time scalar inversion (~2m multiplications).
+///
+/// # Constant-time
+/// Yes. Every loop runs a fixed number of iterations (t per position) and
+/// the g(α_j) = 0 case (non-invertible denominator) is handled with
+/// conditional selection, mirroring `inv_mod`'s `is_invertible` flag.
 fn compute_syndrome(v: &[u8], sk: &PrivateKey) -> (SysPoly, Choice) {
+    let t = PARAMS.t;
+    let g = &sk.g;
     let mut s_poly = SysPoly::zero();
     let mut all_valid = Choice::from(1u8);
 
     for (j, &v_j) in v.iter().enumerate().take(PARAMS.n) {
-        let mut denom = SysPoly::zero();
-        denom.coeffs[0] = sk.alphas[j];
-        denom.coeffs[1] = SysGF::new(1);
+        let alpha = sk.alphas[j];
 
-        let (inv, is_invertible) = denom.inv_mod(&sk.g, PARAMS.t);
-        all_valid &= is_invertible;
+        // Single Horner pass computing h_j (degree t−1) and g(α_j):
+        //   h_{t−1} = g_t,  h_{i−1} = g_i + α·h_i,  g(α) = g_0 + α·h_0
+        // Requires g monic of degree t — guaranteed by keygen, which only
+        // accepts polynomials with deg(g) == t from generate_irreducible.
+        let mut h = SysPoly::zero();
+        let mut acc = g.coeffs[t];
+        h.coeffs[t - 1] = acc;
+        for i in (1..t).rev() {
+            acc = acc * alpha + g.coeffs[i];
+            h.coeffs[i - 1] = acc;
+        }
+        let g_alpha = acc * alpha + g.coeffs[0];
 
+        // If g(α_j) == 0 the inverse does not exist: mask the term to zero
+        // and mark the syndrome invalid.
+        let is_zero = g_alpha.ct_eq(&SysGF::new(0));
+        let inv = SysGF::conditional_select(&g_alpha.inv(), &SysGF::new(0), is_zero);
+        all_valid &= !is_zero;
+
+        // S(x) += v_j · (x − α_j)⁻¹ mod g(x)
         let mask = Choice::from(v_j);
-
-        for i in 0..POLY_CAPACITY {
+        for i in 0..t {
             s_poly.coeffs[i] = SysGF::conditional_select(
                 &s_poly.coeffs[i],
-                &(s_poly.coeffs[i] + inv.coeffs[i]),
+                &(s_poly.coeffs[i] + h.coeffs[i] * inv),
                 mask,
             );
         }
