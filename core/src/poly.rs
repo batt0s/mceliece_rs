@@ -37,6 +37,18 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         Polynomial { coeffs: [GF(0); N] }
     }
 
+    /// Returns the unit polynomial (all coefficients set to 1).
+    pub const fn unit() -> Self {
+        Polynomial { coeffs: [GF(1); N] }
+    }
+
+    /// Returns the one polynomial (all coefficients set to 0 except the first).
+    pub const fn one() -> Self {
+        let mut p = Polynomial { coeffs: [GF(0); N] };
+        p.coeffs[0] = GF(1);
+        p
+    }
+
     /// Creates a polynomial from a slice of field elements.
     ///
     /// If the slice is shorter than N, the remaining coefficients
@@ -529,7 +541,17 @@ impl<const M: u8, const N: usize> Polynomial<M, N> {
         }
 
         let f0_final = f.coeffs[0];
-        let is_invertible = !f0_final.ct_eq(&GF::new(0));
+        // The final f is the gcd of (m, self) up to a scalar. self has an
+        // inverse mod m iff that gcd is a non-zero CONSTANT (degree 0).
+        // Checking only the constant term is insufficient: for reducible m,
+        // or self = 0 mod m, the algorithm terminates with a non-constant
+        // gcd whose constant term is non-zero (e.g. gcd(x+1, x^3+1) = x+1),
+        // and would wrongly report an invertible element.
+        let mut f_rest_zero = Choice::from(1);
+        for i in 1..N {
+            f_rest_zero &= f.coeffs[i].ct_eq(&GF::new(0));
+        }
+        let is_invertible = !f0_final.ct_eq(&GF::new(0)) & f_rest_zero;
 
         let safe_f0 = GF::conditional_select(&f0_final, &GF::new(1), !is_invertible);
         let safe_f0_inv = safe_f0.inv();
@@ -607,6 +629,17 @@ mod tests {
     }
 
     #[test]
+    fn test_poly_eval_deg_zero() {
+        let p: TestPoly = poly![7];
+
+        let result = p.eval(TestGF::new(2));
+        assert_eq!(result, TestGF::new(7));
+
+        let result = p.eval(TestGF::new(0));
+        assert_eq!(result, TestGF::new(7));
+    }
+
+    #[test]
     fn test_poly_ct_div_rem() {
         let p: TestPoly = poly![1, 1, 1, 1]; // x^3 + x^2 + x + 1
         let q: TestPoly = poly![1, 1]; // x + 1
@@ -621,6 +654,22 @@ mod tests {
         let q: TestPoly = poly![1, 0, 1]; // x^2 + 1
         let gcd = TestPoly::gcd(&p, &q, p.deg());
         assert_eq!(gcd, poly![1, 1]); // x + 1
+    }
+
+    #[test]
+    fn test_poly_gcd_with_zero() {
+        let p: TestPoly = poly![1, 0, 0, 1]; // x^3 + 1
+        let q: TestPoly = TestPoly::zero(); // 0
+        let gcd = TestPoly::gcd(&p, &q, p.deg());
+        assert_eq!(gcd, poly![1, 0, 0, 1]); // x^3 + 1
+    }
+
+    #[test]
+    fn test_poly_gcd_with_zero_zero() {
+        let p: TestPoly = TestPoly::zero(); // 0
+        let q: TestPoly = TestPoly::zero(); // 0
+        let gcd = TestPoly::gcd(&p, &q, p.deg());
+        assert!(gcd.is_zero().unwrap_u8() == 1); // 0
     }
 
     #[test]
@@ -702,6 +751,26 @@ mod tests {
     }
 
     #[test]
+    fn test_poly_minpoly_of_unit() {
+        let f_y = f_y_460896();
+        let unit = TestPoly::one();
+        let minpoly = unit.minpoly(&f_y, 1);
+
+        assert_eq!(minpoly, poly![1, 1], "minpoly of unit must be x + 1");
+        assert_eq!(minpoly.deg(), 1, "minpoly of unit must have degree 1");
+        assert_eq!(
+            minpoly.coeffs[minpoly.deg()].0,
+            1,
+            "minpoly of unit must be monic"
+        );
+        assert_eq!(
+            minpoly.eval(TestGF::new(1)),
+            TestGF::zero(),
+            "minpoly of unit must evaluate to 0"
+        );
+    }
+
+    #[test]
     fn test_poly_inv_mod() {
         let f = f_y_460896();
 
@@ -721,5 +790,40 @@ mod tests {
 
         assert_eq!(rem.deg(), 0, "a(x) * a^-1(x) mod f(x) should have degree 0");
         assert_eq!(rem.coeffs[0].0, 1, "a(x) * a^-1(x) mod f(x) must be 1");
+    }
+
+    #[test]
+    fn test_poly_inv_mod_non_invertible() {
+        let f = poly![1, 0, 0, 1]; // x^3 + 1
+
+        // a(x) = x + 1
+        let a = poly![1, 1];
+
+        let (inv, inv_valid) = a.inv_mod(&f, f.deg());
+        assert!(
+            inv_valid.unwrap_u8() == 0,
+            "a(x) must not have an inverse modulo f(x)"
+        );
+
+        let b = f;
+        let (inv, inv_valid) = b.inv_mod(&f, f.deg());
+        assert!(
+            inv_valid.unwrap_u8() == 0,
+            "f(x) must not have an inverse modulo f(x)"
+        );
+
+        let c = TestPoly::zero();
+        let (inv, inv_valid) = c.inv_mod(&f, f.deg());
+        assert!(
+            inv_valid.unwrap_u8() == 0,
+            "0 must not have an inverse modulo f(x)"
+        );
+    }
+
+    #[test]
+    fn test_poly_deg_zero() {
+        let p: TestPoly = TestPoly::zero();
+        assert_eq!(p.deg(), 0, "degree of zero polynomial must be 0");
+        assert_eq!(p.lead().0, 0, "coeff of zero polynomial must be 0");
     }
 }

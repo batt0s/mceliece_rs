@@ -19,6 +19,11 @@ impl<const M: u8> GF<M> {
         GF(value & ((1u16 << M) - 1))
     }
 
+    /// Returns the zero element of the field (all bits set to 0).
+    pub fn zero() -> Self {
+        GF(0)
+    }
+
     /// Returns the irreducible polynomial for GF(2^M) as a bitmask.
     ///
     /// Used internally for carry-less multiplication reduction.
@@ -167,6 +172,7 @@ impl<const M: u8> ConditionallySelectable for GF<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     type TestGF = GF<13>;
 
@@ -238,5 +244,52 @@ mod tests {
 
         let one = TestGF::new(1);
         assert_eq!(one.sqrt(), one, "sqrt(1) should be 1");
+    }
+
+    /// Uniform strategy over all 8192 elements of GF(2^13): 0..2^M.
+    ///
+    /// A local strategy beats `impl Arbitrary for GF<M>` here: GF is
+    /// generic over `const M`, so an `Arbitrary` impl would have to be
+    /// a blanket impl for all M, leaking proptest into the public API
+    /// (or requiring `#[cfg(test)]` gating on a trait impl).
+    fn any_gf13() -> impl Strategy<Value = TestGF> {
+        (0u16..(1 << 13)).prop_map(TestGF::new)
+    }
+
+    proptest! {
+        /// Addition in GF(2^m) is XOR, so (GF, +) is an abelian group:
+        /// (a + b) + c == a + (b + c) must hold for every a, b, c.
+        #[test]
+        fn prop_gf_add_associative(a in any_gf13(), b in any_gf13(), c in any_gf13()) {
+            prop_assert_eq!((a + b) + c, a + (b + c));
+        }
+
+        /// Multiplication in GF(2^m) is defined by the polynomial modulus, so (GF, *) is a group:
+        /// (a * b) * c == a * (b * c) must hold for every a, b, c.
+        #[test]
+        fn prop_gf_mul_associative(a in any_gf13(), b in any_gf13(), c in any_gf13()) {
+            prop_assert_eq!((a * b) * c, a * (b * c));
+        }
+
+        /// Addition in GF(2^m) is XOR, so (GF, +) is an abelian group:
+        /// a + b == b + a must hold for every a, b.
+        #[test]
+        fn prop_gf_add_commutative(a in any_gf13(), b in any_gf13()) {
+            prop_assert_eq!(a + b, b + a);
+        }
+
+        /// Multiplication in GF(2^m) is defined by the polynomial modulus, so (GF, *) is a group:
+        /// a * b == b * a must hold for every a, b.
+        #[test]
+        fn prop_gf_mul_commutative(a in any_gf13(), b in any_gf13()) {
+            prop_assert_eq!(a * b, b * a);
+        }
+
+        /// Multiplication in GF(2^m) is distributive:
+        /// a * (b + c) == a * b + a * c must hold for every a, b, c.
+        #[test]
+        fn prop_gf_mul_distributive(a in any_gf13(), b in any_gf13(), c in any_gf13()) {
+            prop_assert_eq!(a * (b + c), a * b + a * c);
+        }
     }
 }

@@ -734,8 +734,18 @@ pub fn decapsulate(c: &Ciphertext, sk: &PrivateKey) -> SessionKey {
 #[cfg(test)]
 mod tests {
     use crate::params::PK_SIZE;
+    use proptest::prelude::*;
+    use rand::SeedableRng;
+    use std::sync::OnceLock;
 
     use super::*;
+
+    /// Keypair shared by the roundtrip proptest. Keygen is expensive and
+    /// seed-sensitive (seeded_keygen retries until the derived Goppa
+    /// polynomial and field ordering are valid), so generate exactly once
+    /// with a known-good seed: [7u8; 32] is also used by
+    /// test_decapsulation_lifecycle.
+    static KEYPAIR: OnceLock<(PublicKey, PrivateKey)> = OnceLock::new();
 
     #[test]
     fn test_generate_irreducible() {
@@ -964,5 +974,23 @@ mod tests {
             k1, k2,
             "Session key should match after serialize/deserialize round-trip"
         );
+    }
+
+    // TODO: This takes around 5 minutes.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5))]
+
+        /// For the generated keypair, encapsulate(decapsulate(e)) must be the
+        /// identity on the session key for every weight-t error vector.
+        #[test]
+        fn prop_encaps_decaps_roundtrip(seed in any::<[u8; 32]>()) {
+            let (pk, sk) = seeded_keygen(seed);
+            let (c, k_enc) = encapsulate(&pk);
+            let k_dec = decapsulate(&c, &sk);
+            prop_assert_eq!(
+                k_enc, k_dec,
+                "decapsulated key must match encapsulated key"
+            );
+        }
     }
 }
