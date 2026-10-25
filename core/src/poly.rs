@@ -1,6 +1,7 @@
 use crate::gf::GF;
 use std::ops::{Index, Mul};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use zeroize::Zeroize;
 
 // Macro for creating polynomials, used in tests
 #[cfg(test)]
@@ -600,6 +601,18 @@ impl<const M: u8, const N: usize> Mul for &Polynomial<M, N> {
     }
 }
 
+/// Zeroize Polynomial
+///
+/// When you drop a polynomial, the value remains in the memory.
+/// This function zeroizes the value (replace all bits with 0).
+impl<const M: u8, const N: usize> Zeroize for Polynomial<M, N> {
+    fn zeroize(&mut self) {
+        for c in self.coeffs.iter_mut() {
+            c.zeroize();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,5 +838,45 @@ mod tests {
         let p: TestPoly = TestPoly::zero();
         assert_eq!(p.deg(), 0, "degree of zero polynomial must be 0");
         assert_eq!(p.lead().0, 0, "coeff of zero polynomial must be 0");
+    }
+
+    /// `Zeroize` must clear every coefficient, including the last capacity slot.
+    ///
+    /// `Polynomial` is `Copy`, so it cannot implement `ZeroizeOnDrop`. This
+    /// only verifies the explicit `zeroize()` call, not any drop behavior.
+    #[test]
+    fn test_poly_zeroize() {
+        let mut p: TestPoly = TestPoly::zero();
+        p.coeffs[0] = TestGF::new(123);
+        let last = p.coeffs.len() - 1;
+        p.coeffs[last] = TestGF::new(456);
+
+        p.zeroize();
+
+        assert!(
+            p.coeffs.iter().all(|c| c.0 == 0),
+            "zeroize must clear every coefficient"
+        );
+        assert_eq!(
+            p.is_zero().unwrap_u8(),
+            1,
+            "zeroized polynomial must be zero"
+        );
+    }
+
+    #[test]
+    fn test_poly_zeroize_zero_poly() {
+        let mut p: TestPoly = TestPoly::zero();
+        p.zeroize();
+        assert!(
+            p.coeffs.iter().all(|c| c.0 == 0),
+            "zeroizing zero must stay zero"
+        );
+    }
+
+    #[test]
+    fn test_poly_implements_zeroize() {
+        fn assert_zeroize<T: Zeroize>() {}
+        assert_zeroize::<TestPoly>();
     }
 }

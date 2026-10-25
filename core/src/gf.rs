@@ -1,5 +1,6 @@
 use std::ops::{Add, Mul};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use zeroize::Zeroize;
 
 /// Element of the finite field GF(2^M).
 ///
@@ -169,6 +170,16 @@ impl<const M: u8> ConditionallySelectable for GF<M> {
     }
 }
 
+/// Zeroize GF Value
+///
+/// When you drop a GF, the value remains in the memory.
+/// This function zeroizes the value (replace all bits with 0).
+impl<const M: u8> Zeroize for GF<M> {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +302,34 @@ mod tests {
         fn prop_gf_mul_distributive(a in any_gf13(), b in any_gf13(), c in any_gf13()) {
             prop_assert_eq!(a * (b + c), a * b + a * c);
         }
+
+        /// Zeroizing an arbitrary field element must clear it.
+        #[test]
+        fn prop_gf_zeroize(value in any_gf13()) {
+            let mut a = value;
+            a.zeroize();
+            prop_assert_eq!(a.0, 0);
+        }
+    }
+
+    /// `Zeroize` must overwrite the element with zero.
+    ///
+    /// `GF` is `Copy`, so it cannot implement `ZeroizeOnDrop`. This only
+    /// verifies the explicit `zeroize()` call, not any drop behavior.
+    #[test]
+    fn test_gf_zeroize() {
+        let mut a = TestGF::new(0x1FFF);
+        a.zeroize();
+        assert_eq!(a.0, 0, "zeroize must clear the field element");
+
+        let mut zero = TestGF::zero();
+        zero.zeroize();
+        assert_eq!(zero.0, 0, "zeroizing zero must stay zero");
+    }
+
+    #[test]
+    fn test_gf_implements_zeroize() {
+        fn assert_zeroize<T: Zeroize>() {}
+        assert_zeroize::<TestGF>();
     }
 }
