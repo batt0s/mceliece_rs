@@ -9,6 +9,7 @@ use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
 };
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The field GF(2^m) element type for the active parameter set.
 pub type SysGF = GF<{ PARAMS.m }>;
@@ -194,6 +195,25 @@ impl PrivateKey {
         })
     }
 }
+
+/// Zeroize PrivateKey
+impl Zeroize for PrivateKey {
+    fn zeroize(&mut self) {
+        self.delta.zeroize();
+        self.c.zeroize();
+        self.g.zeroize();
+        self.alphas.zeroize();
+        self.s.zeroize();
+    }
+}
+
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PrivateKey {}
 
 /// Reverses the order of the low `m` bits of `value`. Self-inverse.
 fn reverse_bits(value: u16, m: u8) -> u32 {
@@ -965,6 +985,31 @@ mod tests {
             k1, k2,
             "Session key should match after serialize/deserialize round-trip"
         );
+    }
+
+    #[test]
+    fn test_sk_zeroize_clears_fields() {
+        let mut sk = PrivateKey {
+            delta: [1u8; 32],
+            c: [2u8; 8],
+            g: SysPoly::one(),
+            alphas: vec![SysGF::new(5); 4],
+            s: vec![9u8; 4],
+        };
+
+        sk.zeroize();
+
+        assert!(sk.delta.iter().all(|&b| b == 0));
+        assert!(sk.c.iter().all(|&b| b == 0));
+        assert!(sk.g.coeffs.iter().all(|c| c.0 == 0));
+        assert!(sk.alphas.is_empty());
+        assert!(sk.s.is_empty());
+    }
+
+    #[test]
+    fn test_sk_zeroize_on_drop() {
+        fn assert_zod<T: ZeroizeOnDrop>() {}
+        assert_zod::<PrivateKey>();
     }
 
     // TODO: This takes around 5 minutes.
